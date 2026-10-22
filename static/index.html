@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mock Test Maker</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1c2430;--mute:#5d6877;--line:#d9dee5;--accent:#1b5e8c;--accent-d:#134767;--ok:#12703f;--okbg:#e6f4ec;--bad:#b3261e;--badbg:#fbe9e7;--warn:#8a5a00;--warnbg:#fff3d6}
+@media (prefers-color-scheme:dark){:root{--bg:#12161c;--card:#1b212a;--ink:#e8ecf1;--mute:#9aa6b5;--line:#2c3541;--accent:#5aa9e0;--accent-d:#8cc3ec;--ok:#5fd08f;--okbg:#14301f;--bad:#ff8d85;--badbg:#3a1c1a;--warn:#f2c14e;--warnbg:#33290f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:20px 16px 80px}
+h1{font-size:1.4rem;margin:0}h2{font-size:1.25rem;margin:0 0 4px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:20px}
+.steps{display:flex;gap:6px;font-size:.85rem;color:var(--mute)}
+.steps span{padding:3px 10px;border-radius:99px;border:1px solid var(--line)}
+.steps .on{background:var(--accent);border-color:var(--accent);color:#fff}
+.steps .done{color:var(--ink)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:14px}
+.mute{color:var(--mute)}.small{font-size:.9rem}
+button,.btn{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;padding:9px 18px}
+button:hover{background:var(--accent-d)}
+button.ghost{background:transparent;color:var(--accent)}button.ghost:hover{background:var(--bg)}
+button.danger{border-color:var(--bad);color:var(--bad);background:transparent;padding:5px 12px;font-size:.9rem}
+button:disabled{opacity:.45;cursor:not-allowed}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+input[type=text],input[type=number],textarea,select{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:7px 9px;width:100%}
+textarea{resize:vertical;min-height:60px}
+.drop{border:2px dashed var(--line);border-radius:10px;padding:36px 16px;text-align:center}
+.drop.over{border-color:var(--accent);background:var(--bg)}
+.msg{padding:10px 14px;border-radius:8px;margin:12px 0;font-size:.95rem}
+.err{background:var(--badbg);color:var(--bad)}.warnbox{background:var(--warnbg);color:var(--warn)}
+.qhead{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+.tag{font-size:.8rem;padding:2px 8px;border-radius:99px;background:var(--warnbg);color:var(--warn);margin-left:8px}
+.optrow{display:flex;align-items:center;gap:8px;margin-top:6px}
+.optrow label.key{display:flex;align-items:center;gap:4px;font-weight:600;min-width:46px}
+.settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin:10px 0 14px}
+.settings label{display:block;font-size:.9rem;color:var(--mute);margin-bottom:3px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.opt{display:flex;gap:10px;align-items:flex-start;width:100%;text-align:left;background:var(--card);color:var(--ink);border:1px solid var(--line);margin-top:8px;padding:11px 14px}
+.opt:hover{background:var(--bg)}
+.opt.sel{border-color:var(--accent);background:var(--bg);box-shadow:inset 3px 0 0 var(--accent)}
+.opt b{min-width:20px}
+.bar{height:6px;background:var(--line);border-radius:9px;overflow:hidden;margin:8px 0 14px}.bar i{display:block;height:100%;background:var(--accent)}
+.pal{display:flex;flex-wrap:wrap;gap:6px;margin-top:14px}
+.pal button{padding:0;width:34px;height:34px;background:var(--card);color:var(--ink);border-color:var(--line);font-size:.85rem}
+.pal button.ans{background:var(--accent);color:#fff;border-color:var(--accent)}
+.pal button.cur{outline:3px solid var(--accent);outline-offset:1px}
+.timer{font-variant-numeric:tabular-nums;font-weight:600}
+.score{font-size:3rem;font-weight:700;line-height:1.1}
+.stats{display:flex;gap:22px;flex-wrap:wrap;margin-top:8px}
+.rev{border-left:4px solid var(--line)}.rev.c{border-color:var(--ok)}.rev.w{border-color:var(--bad)}.rev.s{border-color:var(--warn)}
+.ro{padding:5px 10px;border-radius:6px;margin-top:5px}.ro.good{background:var(--okbg);color:var(--ok)}.ro.wrong{background:var(--badbg);color:var(--bad)}
+.hidden{display:none}
+.figs{margin:8px 0}
+.fig{display:block;max-width:100%;height:auto;margin:6px 0;background:#fff;border:1px solid var(--line);border-radius:6px}
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <h1>Mock Test Maker</h1>
+    <div class="steps" id="steps"></div>
+  </div>
+  <div id="app"></div>
+</main>
+<script>
+const app = document.getElementById("app");
+const STEPS = ["Upload", "Verify", "Test", "Result"];
+let questions = [];   // verified, editable question list
+let fileName = "";
+let T = null;
+let meta = {};
+let aiOn = false;
+let lastFile = null;         // current test state
+
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, "");
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid);
+  return el;
+}
+const figs = q => (q.images && q.images.length)
+  ? h("div", { class: "figs" }, q.images.map(src => h("img", { class: "fig", src, alt: "Figure for this question" }))) : null;
+function show(step, ...nodes) {
+  document.getElementById("steps").replaceChildren(...STEPS.map((s, i) =>
+    h("span", { class: i === step ? "on" : i < step ? "done" : "" }, `${i + 1}. ${s}`)));
+  app.replaceChildren(...nodes);
+  if (show.last !== step) window.scrollTo(0, 0);
+  show.last = step;
+}
+
+/* ---------- 1. Upload ---------- */
+function viewUpload(error = "") {
+  const input = h("input", { type: "file", accept: "application/pdf,.pdf", class: "hidden", id: "file" });
+  const drop = h("div", { class: "drop" },
+    h("p", {}, h("b", {}, "Drop a PDF here")),
+    h("p", { class: "mute small" }, "The PDF needs selectable text, with numbered questions, lettered options and answers."),
+    h("button", { onclick: () => input.click() }, "Choose PDF"));
+  const status = h("div", {});
+  const cap = h("p", { class: "mute small" });
+  fetch("/api/status").then(r => r.json()).then(s => { aiOn = s.ai; cap.textContent = `OCR for scanned PDFs: ${s.ocr ? "ready" : "not installed"}. AI parsing: ${s.ai ? "on (" + s.provider + ")" : "off (no API key)"}. App version ${s.version || "old"}.`; }).catch(() => {});
+  if (error) status.append(h("div", { class: "msg err" }, error));
+  async function send(file) {
+    if (!file) return;
+    status.replaceChildren(h("p", { class: "mute" }, "Reading " + file.name + "… scanned PDFs and AI parsing can take a minute."));
+    lastFile = file;
+    const fd = new FormData(); fd.append("pdf", file);
+    try {
+      const r = await fetch("/api/extract", { method: "POST", body: fd });
+      const d = await r.json();
+      if (!r.ok) return viewUpload(d.error);
+      questions = d.questions; fileName = d.filename; meta = d;
+      viewVerify();
+    } catch { viewUpload("Could not reach the server. Is app.py running?"); }
+  }
+  input.addEventListener("change", () => send(input.files[0]));
+  drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("over"); send(e.dataTransfer.files[0]); });
+  show(0, h("div", { class: "card" }, h("h2", {}, "Upload your question PDF"), h("p", { class: "mute" }, "We'll find the questions, options and answers for you to check."), drop, input, status, cap));
+}
+
+/* ---------- 2. Verify ---------- */
+const TYPES = ["MCQ", "MSQ", "NAT"];
+const hasNum = v => v !== "" && v != null && !isNaN(parseFloat(v));
+const selArr = q => Array.isArray(q.answer) ? q.answer : q.answer ? [q.answer] : [];
+const problems = q => {
+  const p = [];
+  if (!q.question.trim()) p.push("No question text");
+  if (q.type === "NAT") { if (!q.answer || !hasNum(q.answer.min)) p.push("No numeric answer"); }
+  else {
+    if (Object.keys(q.options).length < 2) p.push("Fewer than 2 options");
+    const a = selArr(q);
+    if (!a.length || a.some(x => !q.options[x])) p.push("No correct answer");
+  }
+  return p;
+};
+function setType(q, t) {
+  if (q.type === t) return;
+  if (t === "NAT") q.answer = { min: "", max: "" };
+  else {
+    if (!Object.keys(q.options).length) q.options = { A: "", B: "", C: "", D: "" };
+    q.answer = q.type === "NAT" ? (t === "MSQ" ? [] : null) : t === "MSQ" ? (q.answer ? [q.answer] : []) : (q.answer && q.answer[0] || null);
+  }
+  q.type = t;
+}
+function viewVerify() {
+  const list = h("div", {}), summary = h("p", { class: "mute" }), msg = h("div", {});
+  const startBtn = h("button", { onclick: begin }, "Start test");
+  const cnt = h("input", { type: "number", min: 1, id: "cnt" });
+  const tmr = h("input", { type: "number", min: 0, value: 0, id: "tmr" });
+  const shuf = h("select", { id: "shuf" }, h("option", { value: "1" }, "Shuffled"), h("option", { value: "0" }, "Original order"));
+  const neg = h("select", { id: "neg" }, h("option", { value: "0" }, "None"), h("option", { value: "0.3333333" }, "1/3 mark"), h("option", { value: "0.25" }, "1/4 mark"));
+
+  function refresh() {
+    const bad = questions.filter(q => problems(q).length).length;
+    const by = t => questions.filter(q => q.type === t).length;
+    summary.textContent = `${questions.length} questions found in ${fileName} (${by("MCQ")} MCQ, ${by("MSQ")} MSQ, ${by("NAT")} NAT).` + (bad ? ` ${bad} need attention.` : " All look complete.");
+    cnt.max = Math.max(questions.length, 1);
+    if (!cnt.value || +cnt.value > questions.length) cnt.value = questions.length;
+    startBtn.disabled = !questions.length;
+  }
+  function render() {
+    list.replaceChildren(...questions.map((q, qi) => {
+      const tag = h("span", { class: "tag" });
+      const aiTag = h("span", { class: "tag", style: "background:var(--bg);color:var(--accent)" }, "AI suggested, verify");
+      aiTag.hidden = !q.ai;
+      const optTag = h("span", { class: "tag" });
+      const hintTag = h("span", { class: "tag", style: "background:var(--bg);color:var(--accent)" }, "Possible MSQ (wording hint)");
+      hintTag.hidden = !q.hint;
+      const upd = () => { const n = Object.keys(q.options).length; optTag.textContent = q.type !== "NAT" && n >= 2 && n < 4 ? `Only ${n} options found, check` : ""; optTag.hidden = !optTag.textContent; const p = problems(q); tag.textContent = p.join(", "); tag.hidden = !p.length; refresh(); };
+      const qt = h("textarea", { "aria-label": `Question ${qi + 1} text`, oninput: e => { q.question = e.target.value; upd(); } });
+      qt.value = q.question;
+      const typeSel = h("select", { "aria-label": "Question type", style: "width:auto", onchange: e => { q.hint = false; setType(q, e.target.value); render(); refresh(); } },
+        TYPES.map(t => h("option", { value: t, selected: q.type === t }, t)));
+      let body;
+      if (q.type === "NAT") {
+        q.answer = q.answer || { min: "", max: "" };
+        const mk = (key, label) => {
+          const i = h("input", { type: "text", inputmode: "decimal", placeholder: label, "aria-label": label, style: "width:auto;flex:1;min-width:150px", oninput: e => { q.answer[key] = e.target.value; q.ai = false; aiTag.hidden = true; upd(); } });
+          i.value = q.answer[key] != null ? q.answer[key] : ""; return i;
+        };
+        body = h("div", {}, h("p", { class: "mute small", style: "margin:10px 0 6px" }, "Correct answer. Add a maximum only if a range is accepted."),
+          h("div", { class: "row" }, mk("min", "Value or minimum"), mk("max", "Maximum (optional)")));
+      } else {
+        const multi = q.type === "MSQ";
+        body = h("div", {}, h("p", { class: "mute small", style: "margin:10px 0 0" }, multi ? "Tick every correct option:" : "Select the correct option:"),
+          Object.keys(q.options).map(L => {
+            const t = h("input", { type: "text", "aria-label": `Option ${L}`, oninput: e => { q.options[L] = e.target.value; upd(); } });
+            t.value = q.options[L];
+            const ctl = h("input", { type: multi ? "checkbox" : "radio", name: "ans" + qi, checked: selArr(q).includes(L),
+              onchange: e => { if (multi) { const s = new Set(selArr(q)); e.target.checked ? s.add(L) : s.delete(L); q.answer = [...s].sort(); } else q.answer = L; q.ai = false; aiTag.hidden = true; upd(); } });
+            return h("div", { class: "optrow" }, h("label", { class: "key" }, ctl, L), t);
+          }),
+          Object.keys(q.options).length < 6 ? h("button", { class: "ghost", style: "margin-top:8px", onclick: () => {
+            q.options[String.fromCharCode(65 + Object.keys(q.options).length)] = "(see figure)"; render(); refresh(); } }, "+ Add option") : null);
+      }
+      upd();
+      return h("div", { class: "card" },
+        h("div", { class: "qhead" }, h("div", { class: "row" }, h("b", {}, `Question ${qi + 1}`), typeSel, hintTag, optTag, tag, aiTag),
+          h("button", { class: "danger", onclick: () => { questions.splice(qi, 1); render(); refresh(); } }, "Remove")),
+        qt, figs(q), body);
+    }));
+  }
+  const sugBtn = h("button", { class: "ghost", onclick: suggest }, "Suggest missing answers and types with AI");
+  const sugMsg = h("span", { class: "mute small" });
+  const rereadBtn = h("button", { class: "ghost", onclick: reread }, "Re-read PDF with AI (better for maths)");
+  async function reread() {
+    if (!confirm("The AI will read the PDF again and replace the questions below, including any edits you made. Continue?")) return;
+    rereadBtn.disabled = true; sugMsg.textContent = "AI is reading the PDF… this can take a few minutes.";
+    const fd = new FormData(); fd.append("pdf", lastFile); fd.append("force_ai", "1");
+    try {
+      const r = await fetch("/api/extract", { method: "POST", body: fd }); const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "request failed");
+      questions = d.questions; fileName = d.filename; meta = d; viewVerify();
+    } catch (e) { sugMsg.textContent = "AI re-read failed: " + e.message; rereadBtn.disabled = false; }
+  }
+  async function suggest() {
+    const need = questions.map((q, i) => ({ i, q })).filter(o => o.q.question.trim() && !(o.q.images && o.q.images.length) && !(o.q.type === "NAT" ? hasNum(o.q.answer && o.q.answer.min) : selArr(o.q).length));
+    if (!need.length) { sugMsg.textContent = "Every question already has an answer."; return; }
+    sugBtn.disabled = true; sugMsg.textContent = "Asking the AI…";
+    let got = 0;
+    try {
+      for (let s = 0; s < need.length; s += 10) {  // small batches: faster, and finished batches are kept if a later one fails
+        sugMsg.textContent = `Asking the AI… ${Math.min(s + 10, need.length)} of ${need.length}`;
+        const r = await fetch("/api/suggest", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ questions: need.slice(s, s + 10).map(o => ({ i: o.i, type: o.q.type, question: o.q.question, options: o.q.options })) }) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "request failed");
+        d.answers.forEach(a => { const q = questions[a.i]; q.type = a.type || q.type; q.answer = a.answer; q.ai = true; q.hint = false; });
+        got += d.answers.length; render(); refresh();
+      }
+      sugMsg.textContent = `AI suggested ${got} answer(s). These can be wrong, so check each one marked "AI suggested".`;
+    } catch (e) { sugMsg.textContent = `AI suggestion stopped after ${got} answer(s): ` + e.message + " You can press the button again to continue."; }
+    sugBtn.disabled = false;
+  }
+  function begin() {
+    const bad = questions.map((q, i) => problems(q).length ? i + 1 : 0).filter(Boolean);
+    if (bad.length) { msg.replaceChildren(h("div", { class: "msg warnbox" }, "Fix or remove these questions first: " + bad.join(", "))); return; }
+    const n = Math.min(Math.max(parseInt(cnt.value) || questions.length, 1), questions.length);
+    startTest(n, shuf.value === "1", Math.max(parseInt(tmr.value) || 0, 0), parseFloat(neg.value) || 0);
+  }
+  show(1,
+    h("div", { class: "card" }, h("h2", {}, "Check the extracted questions"), summary,
+      h("p", { class: "small" }, "Read with: " + (meta.method || "Text")),
+      (meta.notes || []).map(n => h("div", { class: "msg warnbox" }, n)),
+      aiOn ? h("div", { class: "row", style: "margin:8px 0" }, sugBtn, lastFile ? rereadBtn : null, sugMsg) : null,
+      h("p", { class: "mute small" }, "Fix parsing mistakes, set the question type (MCQ one answer, MSQ several answers, NAT typed number), and remove anything that isn't a question.")),
+    list,
+    h("div", { class: "card" }, h("h2", {}, "Test settings"),
+      h("div", { class: "settings" },
+        h("div", {}, h("label", { for: "cnt" }, "Number of questions"), cnt),
+        h("div", {}, h("label", { for: "tmr" }, "Time limit (minutes, 0 = none)"), tmr),
+        h("div", {}, h("label", { for: "shuf" }, "Question order"), shuf),
+        h("div", {}, h("label", { for: "neg" }, "Negative marking (wrong MCQ)"), neg)),
+      h("p", { class: "mute small" }, "1 mark per question. MSQ needs every correct option and no wrong ones. NAT accepts any value in the range."),
+      msg,
+      h("div", { class: "row" }, startBtn, h("button", { class: "ghost", onclick: () => viewUpload() }, "Upload a different PDF"))));
+  render(); refresh();
+}
+
+/* ---------- 3. Test ---------- */
+const isAns = v => Array.isArray(v) ? v.length > 0 : v != null && String(v).trim() !== "";
+const nAns = () => T.qs.filter((_, k) => isAns(T.picked[k])).length;
+function startTest(n, shuffle, minutes, neg) {
+  let pool = questions.map(q => JSON.parse(JSON.stringify(q)));
+  if (shuffle) for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+  T = { qs: pool.slice(0, n), picked: {}, i: 0, n, shuffle, minutes, neg, left: minutes * 60, timer: null };
+  if (minutes) T.timer = setInterval(() => { T.left--; tickTimer(); if (T.left <= 0) finish(true); }, 1000);
+  viewQuestion();
+}
+function fmt(s) { return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
+function tickTimer() { const el = document.getElementById("timer"); if (el) el.textContent = fmt(Math.max(T.left, 0)); }
+function paint() {
+  document.getElementById("cinfo").textContent = `Question ${T.i + 1} of ${T.n} · ${nAns()} answered`;
+  document.getElementById("fill").style.width = (nAns() / T.n * 100) + "%";
+  document.querySelectorAll(".pal button").forEach((b, k) => b.classList.toggle("ans", isAns(T.picked[k])));
+}
+function go(k) { T.i = k; viewQuestion(); window.scrollTo(0, 0); }
+function viewQuestion() {
+  const q = T.qs[T.i];
+  let body;
+  if (q.type === "NAT") {
+    const inp = h("input", { type: "text", inputmode: "decimal", autocomplete: "off", placeholder: "Type your numerical answer", "aria-label": "Numerical answer",
+      oninput: e => { T.picked[T.i] = e.target.value; paint(); } });
+    inp.value = T.picked[T.i] || ""; body = inp;
+  } else {
+    const multi = q.type === "MSQ";
+    body = h("div", {}, multi ? h("p", { class: "mute small", style: "margin:0" }, "Select all that apply.") : null,
+      Object.entries(q.options).map(([L, txt]) => {
+        const on = multi ? (T.picked[T.i] || []).includes(L) : T.picked[T.i] === L;
+        return h("button", { class: "opt" + (on ? " sel" : ""), "aria-pressed": String(on), onclick: () => {
+          if (multi) { const s = new Set(T.picked[T.i] || []); s.has(L) ? s.delete(L) : s.add(L); T.picked[T.i] = [...s].sort(); } else T.picked[T.i] = L;
+          viewQuestion(); } }, h("b", {}, L), h("span", {}, txt));
+      }));
+  }
+  const pal = h("div", { class: "pal" }, T.qs.map((_, k) => h("button", { class: k === T.i ? "cur" : "", "aria-label": `Go to question ${k + 1}`, onclick: () => go(k) }, k + 1)));
+  show(2, h("div", { class: "card" },
+    h("div", { class: "qhead" }, h("span", { class: "mute", id: "cinfo" }), T.minutes ? h("span", { class: "timer", id: "timer" }, fmt(Math.max(T.left, 0))) : null),
+    h("div", { class: "bar" }, h("i", { id: "fill" })),
+    h("p", { class: "mute small", style: "margin:0" }, q.type),
+    h("h2", { style: "margin-bottom:8px" }, q.question), figs(q), body,
+    h("div", { class: "row", style: "justify-content:space-between;margin-top:18px" },
+      h("button", { class: "ghost", disabled: T.i === 0, onclick: () => go(T.i - 1) }, "Previous"),
+      isAns(T.picked[T.i]) ? h("button", { class: "ghost", onclick: () => { delete T.picked[T.i]; viewQuestion(); } }, "Clear answer") : null,
+      T.i === T.n - 1 ? h("button", { onclick: () => finish(false) }, "Submit test") : h("button", { onclick: () => go(T.i + 1) }, "Next")),
+    pal));
+  paint();
+}
+function finish(timeUp) {
+  const skipped = T.n - nAns();
+  if (!timeUp && skipped && !confirm(`${skipped} question${skipped > 1 ? "s are" : " is"} unanswered. Submit anyway?`)) return;
+  clearInterval(T.timer);
+  viewResult(timeUp);
+}
+
+/* ---------- 4. Result ---------- */
+function grade(q, v) {
+  if (!isAns(v)) return { st: "s", pts: 0 };
+  let ok;
+  if (q.type === "NAT") {
+    const x = parseFloat(v), lo = parseFloat(q.answer.min), hi = hasNum(q.answer.max) ? parseFloat(q.answer.max) : lo;
+    ok = !isNaN(x) && x >= Math.min(lo, hi) - 1e-9 && x <= Math.max(lo, hi) + 1e-9;
+    return { st: ok ? "c" : "w", pts: ok ? 1 : 0 };
+  }
+  if (q.type === "MSQ") { ok = [...q.answer].sort().join() === [...v].sort().join(); return { st: ok ? "c" : "w", pts: ok ? 1 : 0 }; }
+  ok = v === q.answer;
+  return { st: ok ? "c" : "w", pts: ok ? 1 : -T.neg };
+}
+function viewResult(timeUp) {
+  let score = 0, c = 0, w = 0, s = 0;
+  const total = T.n;
+  const review = T.qs.map((q, k) => {
+    const v = T.picked[k], g = grade(q, v);
+    score += g.pts; g.st === "c" ? c++ : g.st === "w" ? w++ : s++;
+    let rows;
+    if (q.type === "NAT") {
+      const lo = q.answer.min, hi = q.answer.max;
+      rows = [h("div", { class: "ro" + (g.st === "c" ? " good" : g.st === "w" ? " wrong" : "") }, "Your answer: " + (isAns(v) ? v : "not answered")),
+        h("div", { class: "ro good" }, "Correct: " + (hasNum(hi) && parseFloat(hi) !== parseFloat(lo) ? `${lo} to ${hi}` : lo))];
+    } else {
+      const ansArr = Array.isArray(q.answer) ? q.answer : [q.answer];
+      rows = Object.entries(q.options).map(([L, t]) => {
+        const good = ansArr.includes(L), m = Array.isArray(v) ? v.includes(L) : v === L;
+        return h("div", { class: "ro" + (good ? " good" : m ? " wrong" : "") }, `${L}. ${t}` + (good ? "  ✓ correct" : "") + (m && !good ? "  ✗ your answer" : "") + (m && good ? " (your answer)" : ""));
+      });
+    }
+    return h("div", { class: "card rev " + g.st },
+      h("div", { class: "row" }, h("b", {}, `${k + 1}. ${q.question}`), h("span", { class: "tag", style: "background:var(--bg);color:var(--mute)" }, q.type)),
+      figs(q),
+      g.st === "s" ? h("p", { class: "small", style: "color:var(--warn);margin:4px 0 0" }, "Not answered") : null, rows,
+      q.explanation ? h("p", { class: "small mute", style: "margin:8px 0 0" }, "Explanation: " + q.explanation) : null);
+  });
+  show(3,
+    h("div", { class: "card" },
+      timeUp ? h("div", { class: "msg warnbox" }, "Time is up. Your answers were submitted automatically.") : null,
+      h("div", { class: "score" }, `${+score.toFixed(2)} / ${+total.toFixed(2)}`), h("div", { class: "mute" }, `${Math.max(0, Math.round(score / total * 100))}%`),
+      h("div", { class: "stats" }, h("span", { style: "color:var(--ok)" }, `${c} correct`), h("span", { style: "color:var(--bad)" }, `${w} wrong`), h("span", { class: "mute" }, `${s} skipped`)),
+      h("div", { class: "row", style: "margin-top:16px" },
+        h("button", { onclick: () => startTest(T.n, T.shuffle, T.minutes, T.neg) }, "Retake test"),
+        h("button", { class: "ghost", onclick: viewVerify }, "Edit questions"),
+        h("button", { class: "ghost", onclick: () => viewUpload() }, "New PDF"))),
+    h("h2", { style: "margin:18px 0 10px" }, "Review"), review);
+}
+
+viewUpload();
+</script>
+</body>
+</html>
