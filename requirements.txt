@@ -1,5 +1,5 @@
 flask
-pymupdf
+pymupdf>=1.23.0
 pytesseract
 pillow
 requests
