@@ -52,6 +52,15 @@ textarea{resize:vertical;min-height:60px}
 .rev{border-left:4px solid var(--line)}.rev.c{border-color:var(--ok)}.rev.w{border-color:var(--bad)}.rev.s{border-color:var(--warn)}
 .ro{padding:5px 10px;border-radius:6px;margin-top:5px}.ro.good{background:var(--okbg);color:var(--ok)}.ro.wrong{background:var(--badbg);color:var(--bad)}
 .hidden{display:none}
+.qbody{margin:6px 0}
+.qp{white-space:pre-wrap;margin:6px 0;font-size:1.05rem}
+.qcode{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:8px 0;overflow-x:auto;font:.9rem/1.45 ui-monospace,Consolas,"Courier New",monospace;white-space:pre;tab-size:4}
+.qscroll{overflow-x:auto;margin:8px 0}
+table.qt{border-collapse:collapse;font-size:.95rem}
+table.qt caption{caption-side:top;text-align:left;font-weight:600;padding:0 0 4px}
+table.qt th,table.qt td{border:1px solid var(--line);padding:5px 12px;text-align:left;white-space:pre-wrap;vertical-align:top}
+table.qt th{background:var(--bg)}
+.qprev{border-left:3px solid var(--line);padding-left:12px;margin:8px 0}
 .figs{margin:8px 0}
 .fig{display:block;max-width:100%;height:auto;margin:6px 0;background:#fff;border:1px solid var(--line);border-radius:6px}
 </style>
@@ -87,6 +96,21 @@ function h(tag, attrs = {}, ...kids) {
 }
 const figs = q => (q.images && q.images.length)
   ? h("div", { class: "figs" }, q.images.map(src => h("img", { class: "fig", src, alt: "Figure for this question" }))) : null;
+// question text rebuilt from the PDF layout: paragraphs, program code, real tables
+function qbody(q) {
+  if (!q.blocks || !q.blocks.length) return null;
+  return h("div", { class: "qbody" }, q.blocks.map(b => {
+    if (b.t === "code") return h("pre", { class: "qcode" }, b.x);
+    if (b.t === "table") {
+      const [head, ...rest] = b.rows;
+      return h("div", { class: "qscroll" }, h("table", { class: "qt" },
+        b.caption ? h("caption", {}, b.caption) : null,
+        h("thead", {}, h("tr", {}, head.map(c => h("th", {}, c)))),
+        h("tbody", {}, rest.map(r => h("tr", {}, r.map(c => h("td", {}, c)))))));
+    }
+    return h("p", { class: "qp" }, b.x);
+  }));
+}
 function show(step, ...nodes) {
   document.getElementById("steps").replaceChildren(...STEPS.map((s, i) =>
     h("span", { class: i === step ? "on" : i < step ? "done" : "" }, `${i + 1}. ${s}`)));
@@ -175,8 +199,11 @@ function viewVerify() {
       const hintTag = h("span", { class: "tag", style: "background:var(--bg);color:var(--accent)" }, "Possible MSQ (wording hint)");
       hintTag.hidden = !q.hint;
       const upd = () => { const n = Object.keys(q.options).length; optTag.textContent = q.type !== "NAT" && n >= 2 && n < 4 ? `Only ${n} options found, check` : ""; optTag.hidden = !optTag.textContent; const p = problems(q); tag.textContent = p.join(", "); tag.hidden = !p.length; refresh(); };
-      const qt = h("textarea", { "aria-label": `Question ${qi + 1} text`, oninput: e => { q.question = e.target.value; upd(); } });
+      let prev = null;
+      const qt = h("textarea", { "aria-label": `Question ${qi + 1} text`, oninput: e => { q.question = e.target.value; if (q.blocks) { q.blocks = null; if (prev) prev.remove(); } upd(); } });
       qt.value = q.question;
+      const qb = qbody(q);
+      if (qb) prev = h("div", { class: "qprev" }, h("p", { class: "mute small", style: "margin:0 0 2px" }, "How students will see this question (editing the text above switches to plain text):"), qb);
       const typeSel = h("select", { "aria-label": "Question type", style: "width:auto", onchange: e => { q.hint = false; setType(q, e.target.value); render(); refresh(); } },
         TYPES.map(t => h("option", { value: t, selected: q.type === t }, t)));
       let body;
@@ -205,7 +232,7 @@ function viewVerify() {
       return h("div", { class: "card" },
         h("div", { class: "qhead" }, h("div", { class: "row" }, h("b", {}, `Question ${qi + 1}`), typeSel, hintTag, optTag, tag, aiTag),
           h("button", { class: "danger", onclick: () => { questions.splice(qi, 1); render(); refresh(); } }, "Remove")),
-        qt, figs(q), body);
+        qt, prev, figs(q), body);
     }));
   }
   const sugBtn = h("button", { class: "ghost", onclick: suggest }, "Suggest missing answers and types with AI");
@@ -305,7 +332,7 @@ function viewQuestion() {
     h("div", { class: "qhead" }, h("span", { class: "mute", id: "cinfo" }), T.minutes ? h("span", { class: "timer", id: "timer" }, fmt(Math.max(T.left, 0))) : null),
     h("div", { class: "bar" }, h("i", { id: "fill" })),
     h("p", { class: "mute small", style: "margin:0" }, q.type),
-    h("h2", { style: "margin-bottom:8px" }, q.question), figs(q), body,
+    qbody(q) || h("h2", { style: "margin-bottom:8px" }, q.question), figs(q), body,
     h("div", { class: "row", style: "justify-content:space-between;margin-top:18px" },
       h("button", { class: "ghost", disabled: T.i === 0, onclick: () => go(T.i - 1) }, "Previous"),
       isAns(T.picked[T.i]) ? h("button", { class: "ghost", onclick: () => { delete T.picked[T.i]; viewQuestion(); } }, "Clear answer") : null,
@@ -352,8 +379,8 @@ function viewResult(timeUp) {
       });
     }
     return h("div", { class: "card rev " + g.st },
-      h("div", { class: "row" }, h("b", {}, `${k + 1}. ${q.question}`), h("span", { class: "tag", style: "background:var(--bg);color:var(--mute)" }, q.type)),
-      figs(q),
+      h("div", { class: "row" }, h("b", {}, qbody(q) ? `${k + 1}.` : `${k + 1}. ${q.question}`), h("span", { class: "tag", style: "background:var(--bg);color:var(--mute)" }, q.type)),
+      qbody(q), figs(q),
       g.st === "s" ? h("p", { class: "small", style: "color:var(--warn);margin:4px 0 0" }, "Not answered") : null, rows,
       q.explanation ? h("p", { class: "small mute", style: "margin:8px 0 0" }, "Explanation: " + q.explanation) : null);
   });

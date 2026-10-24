@@ -4,7 +4,8 @@ import sys
 
 import pymupdf
 
-from figures import find_figures
+from figures import find_figures, question_bands
+from layout import find_layout
 from quizparse import best_text_parse, complete, quality_ok
 
 doc = pymupdf.open(sys.argv[1])
@@ -21,7 +22,10 @@ print("Types:", {t: sum(1 for q in qs if q["type"] == t) for t in ("MCQ", "MSQ",
 print("Answer key:", info)
 for q in qs[:5]:
     print(q["id"], q["type"], "| options:", len(q["options"]), "| answer:", q["answer"], "|", q["question"][:50])
-imgs, pic = find_figures(doc, qs)
+sb = question_bands(doc, qs)
+imgs, pic = find_figures(doc, qs, starts_bands=sb)
+lay = find_layout(doc, qs, starts_bands=sb, images=imgs)
 print("\nQuestions with a diagram/picture (screen numbers):", [i + 1 for i in sorted(imgs)] or "none",
       "| picture options:", [i + 1 for i in sorted(pic)] or "none")
+print("Questions with a table / code / list layout (screen numbers):", [i + 1 for i in sorted(lay)] or "none")
 print("\nQuality check passes (AI NOT needed):", quality_ok(qs))

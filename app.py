@@ -1,4 +1,4 @@
-"""Mock Test Maker - Version 2.8  (text/OCR -> rules -> AI fallback; MCQ, MSQ, NAT)
+"""Mock Test Maker - Version 2.9  (text/OCR -> rules -> AI fallback; MCQ, MSQ, NAT)
 Local run:   flask --app app run --debug      ->  http://localhost:5000   (debug ONLY on your own computer)
 Deployed:    gunicorn app:app --workers 1 --threads 4 --timeout 180 --access-logfile - --error-logfile -
 """
@@ -15,7 +15,8 @@ from werkzeug.exceptions import HTTPException
 
 import llm
 import ocr
-from figures import find_figures
+from figures import find_figures, question_bands
+from layout import find_layout
 from quizparse import (best_text_parse, complete, has_options, image_based, needs_ai,
                        parse_with_info, problems, quality_ok)
 
@@ -35,7 +36,7 @@ log = logging.getLogger("mocktest")
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
 
-VERSION = "2.8"
+VERSION = "2.9"
 AI_LIMIT = int(os.getenv("AI_DAILY_LIMIT", "40"))  # AI calls per visitor per day (protects the free quota)
 MAX_PAGES = int(os.getenv("MAX_PAGES", "150"))
 _uses = {}
@@ -61,8 +62,9 @@ def _similar(a, b):
 
 
 def carry_images(old, new):
-    """After the AI replaced every question, give the pictures back to the matching questions (by text)."""
-    pics = [q for q in old if q.get("images")]
+    """After the AI replaced every question, give the pictures and layout (tables, code) back to the
+    matching questions (by text)."""
+    pics = [q for q in old if q.get("images") or q.get("blocks")]
     for n in new:
         best, score = None, 0.0
         for q in pics:
@@ -70,7 +72,9 @@ def carry_images(old, new):
             if s > score:
                 best, score = q, s
         if best is not None and score >= 0.6:
-            n["images"] = best["images"]
+            for key in ("images", "blocks"):
+                if best.get(key):
+                    n[key] = best[key]
 
 
 def merge_ai(qs, new, target):
@@ -91,8 +95,9 @@ def merge_ai(qs, new, target):
         if best is not None and score >= 0.5 and complete(new[best]):
             n = new[best]
             n["id"] = q["id"]
-            if q.get("images"):
-                n["images"] = q["images"]
+            for key in ("images", "blocks"):
+                if q.get(key):
+                    n[key] = q[key]
             qs[i] = n
             taken.add(best)
             replaced.append(i + 1)
@@ -156,20 +161,26 @@ def extract():
     # 2. Rule-based parsing
     text, qs, info = best_text_parse(doc, pages, set(blank) if "OCR" in used else set())
 
-    # 2b. Diagrams: cut pictures out of the pages; questions whose options are pictures get "(see figure)" options
+    # 2b. Diagrams and layout: cut pictures out of the pages (questions whose options are pictures get
+    #     "(see figure)" options) and rebuild tables / program code / lists so they are readable
     try:
-        images, pic = find_figures(doc, qs, set(blank))
+        sb = question_bands(doc, qs, set(blank))
+        images, pic = find_figures(doc, qs, set(blank), starts_bands=sb)
         if pic:
             qs, info = parse_with_info(text, pic)
+        layout = find_layout(doc, qs, set(blank), sb, images)
         for i, q in enumerate(qs):
             if i in images:
                 q["images"] = images[i]
-        log.info("Figures: %d question(s) with pictures, %d with picture options", len(images), len(pic))
+            if i in layout:
+                q["blocks"] = layout[i]
+        log.info("Figures: %d with pictures (%d with picture options); layout: %d with tables/code/lists",
+                 len(images), len(pic), len(layout))
         if pic:
             notes.append("Question(s) " + ", ".join(map(str, sorted(i + 1 for i in pic)[:12]))
                          + " use pictures as options. The picture is shown with the question and the options are labelled A, B, C, D.")
     except Exception:
-        log.exception("Figure detection failed")
+        log.exception("Figure / layout detection failed")
 
     # 3. AI fallback, when the result is missing, incomplete, or has fewer options than the rest of the paper
     strict = "OCR" in used

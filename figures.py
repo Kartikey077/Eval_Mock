@@ -1,35 +1,74 @@
 """Find the diagrams / pictures that belong to each question and cut them out of the PDF page,
 so they can be shown with the question (diagram in the question, or pictures used as options A-D).
 
+What goes into the cut-out picture:
+  1. normally ONLY the figure (everything else in the cut is painted white);
+  2. if the figure touches the question text, the question text is included too (never the options);
+  3. only if the figure touches the options, the options are included as well.
+An answer / explanation / solution line is never included, and nothing below it either.
+
 Works on pages with a real text layer (it needs text positions). Scanned pages are skipped.
 Assumes the usual single-column exam layout.
 """
 import base64
+import io
 import re
 from collections import Counter
 
 import pymupdf
+from PIL import Image, ImageDraw
 
-from quizparse import RE_RANGE, junk_option
+from quizparse import RE_LABELONLY, RE_RANGE, junk_option
 
 RE_START = re.compile(
     r"^\s*(?:Question\s*Number\s*:\s*(\d+)|Q(?:uestion)?\s*\.?\s*(\d+)\b|(\d+)\s*[\.\):\-]\s)", re.I)
 RE_LABEL = re.compile(r"^(?:\(([A-Ea-e])\)|([A-Ea-e])[\.\)])$")  # a lone "(A)", "A." or "A)"
+RE_OPTLINE = re.compile(r"^\s*(?:\(\s*[A-Ea-e]\s*\)|[A-Ea-e][\.\)])(?:\s|$)")  # a line that starts an option
+# "Answer: B", "Ans. C", "Correct answer - 5"   (but NOT the blank in the question: "Answer: ________")
+RE_ANSLINE = re.compile(
+    r"^\s*(?:correct\s+(?:answers?|options?)|answers?|ans)\s*(?:[:\-=]|\.\s)\s*(?![_\.\s]*$)\S", re.I)
+RE_SOLLINE = re.compile(r"^\s*(?:explanation|solution|sol\.?|reason|hint)\s*[:\-]", re.I)
 
 DPI = 120
 MAX_FIGURES = 80
 TOP_MARGIN, BOTTOM_MARGIN = 40, 35  # skip page headers/footers on continuation pages
+SIDE = 30  # text this close to the figure sideways is treated as part of it (axis labels, gate names)
 
 
-def _lines(page):
-    out = []
-    for b in page.get_text("dict")["blocks"]:
-        for l in b.get("lines", []):
-            t = "".join(s["text"] for s in l["spans"]).strip()
-            if t:
-                out.append((l["bbox"][1], l["bbox"][0], t))
-    out.sort()
-    return out
+# ---------------------------------------------------------------- reading the page
+
+class Pages:
+    """Caches per-page word lists, text lines and drawings so each page is read only once."""
+
+    def __init__(self, doc):
+        self.doc, self._w, self._d = doc, {}, {}
+
+    def words(self, pn):
+        if pn not in self._w:
+            self._w[pn] = self.doc[pn].get_text("words")
+        return self._w[pn]
+
+    def drawings(self, pn):
+        if pn not in self._d:
+            self._d[pn] = self.doc[pn].get_drawings()
+        return self._d[pn]
+
+    def lines(self, pn, top, bot):
+        """Text lines whose centre is between top and bot, in reading order:
+        dicts with x0, y0, x1, y1, text (words joined by single spaces)."""
+        groups = {}
+        for w in self.words(pn):
+            if top <= (w[1] + w[3]) / 2 <= bot:
+                groups.setdefault((w[5], w[6]), []).append(w)
+        out = []
+        for ws in groups.values():
+            ws.sort(key=lambda w: w[7])
+            text = " ".join(w[4] for w in ws).strip()
+            if text:
+                out.append({"x0": min(w[0] for w in ws), "y0": min(w[1] for w in ws),
+                            "x1": max(w[2] for w in ws), "y1": max(w[3] for w in ws), "text": text})
+        out.sort(key=lambda l: (round(l["y0"]), l["x0"]))
+        return out
 
 
 def _starts(doc, ids, skip):
@@ -37,11 +76,13 @@ def _starts(doc, ids, skip):
     accepts the next expected question numbers, so numbers inside options or tables are not mistaken.
     Paper numbers can repeat (e.g. a General Aptitude part and a subject part both start at Q.1),
     so results are keyed by position, never by number."""
+    pg = Pages(doc)
     found, k = {}, 0
     for pn in range(len(doc)):
         if pn in skip:
             continue
-        for y, _x, t in _lines(doc[pn]):
+        for l in pg.lines(pn, -1, 1e6):
+            t = l["text"]
             if RE_RANGE.match(t):
                 continue
             m = RE_START.match(t)
@@ -50,11 +91,45 @@ def _starts(doc, ids, skip):
             n = int(next(g for g in m.groups() if g))
             window = ids[k:k + 3]
             if n in window:
-                found[k + window.index(n)] = (pn, y)
+                found[k + window.index(n)] = (pn, l["y0"])
                 k += window.index(n) + 1
                 if k >= len(ids):
                     return found
     return found
+
+
+def question_bands(doc, qs, skip=()):
+    """{position: [(page_no, top, bottom), ...]} - the page area(s) each question occupies, and the
+    start positions. The area ends before the next question, and before any answer/solution line."""
+    skip = set(skip)
+    starts = _starts(doc, [q["id"] for q in qs], skip)
+    pg = Pages(doc)
+    bands = {}
+    for k in range(len(qs)):
+        if k not in starts:
+            continue
+        pn, y0 = starts[k]
+        nxt = starts.get(k + 1)
+        H = doc[pn].rect.height
+        if nxt and nxt[0] == pn:
+            raw = [(pn, y0 - 2, nxt[1] - 2)]
+        elif nxt:
+            raw = [(pn, y0 - 2, H - BOTTOM_MARGIN)]
+            for p in range(pn + 1, min(nxt[0], pn + 2) + 1):  # at most one continuation page
+                if p in skip:
+                    break
+                raw.append((p, TOP_MARGIN, (nxt[1] - 2) if p == nxt[0] else doc[p].rect.height - BOTTOM_MARGIN))
+        else:
+            raw = [(pn, y0 - 2, H - BOTTOM_MARGIN)]
+        out = []
+        for p, top, bot in raw:  # stop at an answer / solution line: nothing after it belongs to the question
+            cut = next((l["y0"] - 1 for l in pg.lines(p, top, bot) if l["y0"] > top + 6
+                        and (RE_ANSLINE.match(l["text"]) or RE_SOLLINE.match(l["text"]))), None)
+            out.append((p, top, bot if cut is None else cut))
+            if cut is not None:
+                break
+        bands[k] = out
+    return starts, bands
 
 
 def _repeated_images(doc):
@@ -102,61 +177,108 @@ def _graphics(page, drawings, ytop, ybot, marks):
     return rects, score
 
 
-def find_figures(doc, qs, skip=()):
+# ---------------------------------------------------------------- cutting the figure out
+
+def _crop(page, F, lines, top, bot, picture_labels):
+    """Render the area around figure F. Returns a PNG (bytes).
+    lines: the text lines in this band. Stage 1: figure only. Stage 2: + question text. Stage 3: + options."""
+    W = page.rect.width
+    zone = pymupdf.Rect(F.x0 - SIDE, F.y0 - 14, F.x1 + SIDE, F.y1 + 14)  # text fully inside = part of the figure
+    core = pymupdf.Rect(F.x0 - 2, F.y0 - 2, F.x1 + 2, F.y1 + 2)
+
+    def hits(l, r):
+        return l["y1"] > r.y0 and l["y0"] < r.y1 and l["x1"] > r.x0 and l["x0"] < r.x1
+
+    def inside(l):
+        return l["x0"] >= zone.x0 and l["x1"] <= zone.x1 and l["y0"] >= zone.y0 and l["y1"] <= zone.y1
+
+    kind = {}  # id(line) -> 'fig' | 'opt' | 'ans' | 'stem'
+    for l in lines:
+        t = l["text"]
+        if RE_ANSLINE.match(t) or RE_SOLLINE.match(t):
+            kind[id(l)] = "ans"
+        elif picture_labels and RE_LABELONLY.match(t):
+            kind[id(l)] = "fig"  # (A) (B) (C) (D) labels of picture options belong to the picture
+        elif RE_OPTLINE.match(t):
+            kind[id(l)] = "opt"
+        elif inside(l):
+            kind[id(l)] = "fig"
+        else:
+            kind[id(l)] = "stem"
+
+    opt_hit = any(kind[id(l)] == "opt" and hits(l, core) for l in lines)
+    stem_hit = any(kind[id(l)] == "stem" and hits(l, core) for l in lines)
+    stage = 3 if opt_hit else 2 if stem_hit else 1
+
+    padt, padb = (22, 28) if picture_labels else (6, 6)
+    stem_lines = [l for l in lines if kind[id(l)] == "stem"]
+    opt_lines = [l for l in lines if kind[id(l)] == "opt"]
+    y0, y1 = F.y0 - padt, F.y1 + padb
+    x0, x1 = max(20, F.x0 - SIDE), min(W - 20, F.x1 + SIDE)
+    if stage >= 2:  # include the question text above the figure
+        y0 = min(y0, min([l["y0"] for l in stem_lines] or [y0]) - 2)
+        x0, x1 = 20, W - 20
+    if stage == 3:  # include the options
+        y1 = max(y1, max([l["y1"] for l in opt_lines] or [y1]) + 3)
+    if stage == 1:  # do not run into text above / below: shrink the margin instead
+        above = [l["y1"] + 3 for l in lines if kind[id(l)] != "fig" and l["y1"] <= F.y0 + 1]  # +3: glyphs overshoot the word box
+        below = [l["y0"] - 3 for l in lines if kind[id(l)] != "fig" and l["y0"] >= F.y1 - 1]
+        y0 = max([y0] + [a for a in above if a <= F.y0])
+        y1 = min([y1] + [b for b in below if b >= F.y1])
+    clip = pymupdf.Rect(x0, max(top, y0), x1, min(bot, y1))
+    if clip.height < 15 or clip.width < 15:
+        return None, stage
+
+    pix = page.get_pixmap(clip=clip, dpi=DPI)
+    scale = DPI / 72.0
+    hide = {"ans"} | ({"opt"} if stage < 3 else set()) | ({"stem"} if stage < 2 else set())
+    img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    for l in lines:  # paint over everything that must not be visible
+        if kind[id(l)] in hide:
+            r = pymupdf.Rect(l["x0"] - 2, l["y0"] - 3, l["x1"] + 2, l["y1"] + 3) & clip
+            if not r.is_empty:
+                draw.rectangle([(r.x0 - clip.x0) * scale, (r.y0 - clip.y0) * scale,
+                                (r.x1 - clip.x0) * scale, (r.y1 - clip.y0) * scale], fill=(255, 255, 255))
+    out = io.BytesIO()
+    img.save(out, "PNG", optimize=True)
+    return out.getvalue(), stage
+
+
+def find_figures(doc, qs, skip=(), starts_bands=None):
     """Returns (images, picture_opts).
     images:       {position: [data-URI png, ...]}  the diagram(s) belonging to the question at that position
     picture_opts: {position: ['A','B','C','D']}    questions whose options are pictures (labels but no text)
     Position = index in qs (0-based)."""
-    ids = [q["id"] for q in qs]
-    starts = _starts(doc, ids, set(skip))
+    starts, bands = starts_bands or question_bands(doc, qs, skip)
+    pg = Pages(doc)
     marks = _repeated_images(doc)
-    drawings = {}
     images, picture_opts = {}, {}
     for k, q in enumerate(qs):
-        if k not in starts or len(images) >= MAX_FIGURES:
+        if k not in bands or len(images) >= MAX_FIGURES:
             continue
-        pn, y0 = starts[k]
-        nxt = starts.get(k + 1)
-        H = doc[pn].rect.height
-        # the bands (page, top, bottom) this question occupies
-        if nxt and nxt[0] == pn:
-            bands = [(pn, y0 - 2, nxt[1] - 2)]
-        elif nxt:
-            bands = [(pn, y0 - 2, H - BOTTOM_MARGIN)]
-            for p in range(pn + 1, min(nxt[0], pn + 2) + 1):  # at most one continuation page
-                if p in skip:
-                    break
-                bands.append((p, TOP_MARGIN, (nxt[1] - 2) if p == nxt[0] else doc[p].rect.height - BOTTOM_MARGIN))
-        else:
-            bands = [(pn, y0 - 2, H - BOTTOM_MARGIN)]
-
         real = {L for L, t in q["options"].items() if not junk_option(t)}  # options that really are text
         crops, labels = [], set()
-        for p, top, bot in bands:
+        for p, top, bot in bands[k]:
             page = doc[p]
-            if p not in drawings:
-                drawings[p] = page.get_drawings()
-            rects, score = _graphics(page, drawings[p], top, bot, marks)
+            rects, score = _graphics(page, pg.drawings(p), top, bot, marks)
             if not rects or score < 3:
                 continue
-            u = pymupdf.Rect(rects[0])
+            F = pymupdf.Rect(rects[0])
             for r in rects[1:]:
-                u.include_rect(r)
+                F.include_rect(r)
             W = page.rect.width
             band_labels = set()
-            for w in page.get_text("words", clip=pymupdf.Rect(0, top, W, bot)):
-                m = RE_LABEL.match(w[4])
-                if m:
-                    band_labels.add((m.group(1) or m.group(2)).upper())
+            for w in pg.words(p):
+                if top <= (w[1] + w[3]) / 2 <= bot:
+                    m = RE_LABEL.match(w[4])
+                    if m:
+                        band_labels.add((m.group(1) or m.group(2)).upper())
             labels |= band_labels
-            # Picture options: keep room for the (A)(B)(C)(D) labels. Otherwise crop tight, so the
-            # text of the options just below the diagram is not cut in half.
-            pad_top, pad_bot = (22, 28) if band_labels - real else (6, 6)
-            clip = pymupdf.Rect(20, max(top, u.y0 - pad_top), W - 20, min(bot, u.y1 + pad_bot))
-            if clip.height < 15:
-                continue
-            png = page.get_pixmap(clip=clip, dpi=DPI).tobytes("png")
-            crops.append("data:image/png;base64," + base64.b64encode(png).decode())
+            picture_labels = bool(band_labels - real)  # options are pictures: keep their (A)(B)(C)(D) labels
+            png, _stage = _crop(page, F, pg.lines(p, top, bot), top, bot, picture_labels)
+            if png:
+                crops.append("data:image/png;base64," + base64.b64encode(png).decode())
         if not crops:
             continue
         images[k] = crops
