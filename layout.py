@@ -15,6 +15,36 @@ import pymupdf
 
 from figures import RE_ANSLINE, RE_OPTLINE, RE_SOLLINE, Pages, question_bands
 
+RE_SHEETCELL = re.compile(r"^(?:Q\.?\d+\.?|\(?[A-Ea-e]\)?\.?)?$")  # first column of a question sheet: Q.5, (A), empty
+
+
+def _is_sheet_table(tab):
+    """A table whose first column holds only question numbers and option labels is the PAGE LAYOUT of a
+    question-sheet PDF (every question in a bordered table), not a table that belongs to a question."""
+    try:
+        firsts = [re.sub(r"\s+", "", (r[0] or "")) for r in tab.extract() if r]
+    except Exception:
+        return False
+    full = [f for f in firsts if f]
+    return len(full) >= 2 and all(RE_SHEETCELL.match(f) for f in full)
+
+
+def _detect_sheet(doc, pg, tabs):
+    """True when the PDF is a question sheet. Looks at the first few pages that have ruled tables."""
+    seen = 0
+    for p in range(len(doc)):
+        found = _tables_on(doc[p], pg.drawings(p))
+        if not found:
+            continue
+        tabs[p] = found
+        seen += 1
+        if any(_is_sheet_table(t) for t in found):
+            return True
+        if seen >= 3:
+            break
+    return False
+
+
 RE_QPREFIX = re.compile(r"^\s*(?:Question\s*Number\s*:\s*\d+|Q(?:uestion)?\s*\.?\s*\d+\s*[\.\):\-]?)\s*", re.I)
 RE_LISTITEM = re.compile(r"^\s*(?:[IVX]{1,4}|S\d{1,2})[\.\)]\s+\S")  # "I. text", "II. text", "S1. text"
 RE_LISTLABEL = re.compile(r"^(?:[IVX]{1,4}|S\d{1,2})[\.\)]$")  # a lone "I." or "S1."
@@ -135,7 +165,8 @@ def _table_blocks(words, tab):
 
 def _merge_rows(lines):
     """Pieces that sit on the same row ("I." + its sentence, f1 = ..., f2 = ..., f3 = ...) become one line.
-    Same row = the vertical centres are close (labels and superscripts sit a few points off the baseline)."""
+    Same row = the vertical centres are close (labels and superscripts sit a few points off the baseline).
+    Each row keeps its cells: pieces less than 10pt apart form one cell."""
     ls = sorted(lines, key=lambda l: (l.get("p", 0), (l["y0"] + l["y1"]) / 2))
     rows = []
     for l in ls:
@@ -147,20 +178,95 @@ def _merge_rows(lines):
     out = []
     for r in rows:
         items = sorted(r["items"], key=lambda l: l["x0"])
-        m = dict(items[0])
-        for l in items[1:]:
-            m = {"x0": m["x0"], "y0": min(m["y0"], l["y0"]), "x1": max(m["x1"], l["x1"]), "y1": max(m["y1"], l["y1"]),
-                 "p": m.get("p", 0),
-                 "text": m["text"] + (" " if RE_LISTLABEL.match(m["text"]) else "    ") + l["text"]}
-        out.append(m)
+        cells = []
+        for l in items:
+            if cells and (l["x0"] - cells[-1][1] < 10 or RE_LISTLABEL.match(cells[-1][2])):
+                c = cells[-1]
+                cells[-1] = (c[0], max(c[1], l["x1"]), c[2] + " " + l["text"])
+            else:
+                cells.append((l["x0"], l["x1"], l["text"]))
+        out.append({"x0": items[0]["x0"], "y0": min(l["y0"] for l in items), "x1": max(l["x1"] for l in items),
+                    "y1": max(l["y1"] for l in items), "p": r["p"], "cells": cells,
+                    "mono": all(l.get("mono") for l in items),
+                    "text": "    ".join(c[2] for c in cells)})
     return out
+
+
+RE_MATHGLYPH = re.compile(r"[\uf000-\uf8ff\u23a0-\u23af\u2320\u2321]")  # symbol-font glyphs, big-brace pieces
+RE_LABELCELL = re.compile(r"^(?:\(?[A-Ea-e]\)?[\.\)]?|[IVX]{1,4}[\.\)]|S\d{1,2}[\.\)])$")  # "(A)", "I.", "S1."
+
+
+def _grid_table(run):
+    """Consecutive rows with 2+ cells that line up in columns -> a table block (text-aligned table, no ruling
+    lines needed). Returns (block, rows_used) or None. The longest valid prefix of the run is used."""
+    for end in range(len(run), 2, -1):  # a table needs at least 3 rows
+        sub = run[:end]
+        iv = sorted((c[0], c[1]) for r in sub for c in r["cells"])
+        cols = []
+        for a, b in iv:  # columns = overlapping x-ranges of the pieces
+            if cols and a <= cols[-1][1] + 6:
+                cols[-1][1] = max(cols[-1][1], b)
+            else:
+                cols.append([a, b])
+        if len(cols) < 2:
+            continue
+
+        def col_of(c):
+            mid = (c[0] + c[1]) / 2
+            return next((i for i, (a, b) in enumerate(cols) if a - 1 <= mid <= b + 1), None)
+
+        grid, ok = [], True
+        for r in sub:
+            idx = [col_of(c) for c in r["cells"]]
+            if None in idx or len(set(idx)) != len(idx):
+                ok = False
+                break
+            row = [""] * len(cols)
+            for i, c in zip(idx, r["cells"]):
+                row[i] = c[2]
+            grid.append(row)
+        if not ok:
+            continue
+        firsts = [row[0] for row in grid if row[0]]
+        if firsts and all(RE_LABELCELL.match(t) for t in firsts):
+            return None  # a list of labelled items ("I. ...", "(A) ..."), not a table
+        if any(RE_MATHGLYPH.search(t) for row in grid for t in row):
+            return None  # brace / symbol-font pieces: a formula laid out in rows, not a table
+        keep = [i for i in range(len(cols)) if any(row[i] for row in grid)]
+        grid = [[row[i] for i in keep] for row in grid]
+        return {"t": "table", "caption": None, "rows": grid}, end
+    return None
+
+
+def _split_tables(rows):
+    """Replace runs of column-aligned rows by table blocks. Returns a list of ('rows', [row..]) / ('table', block)."""
+    parts, buf, i, n = [], [], 0, len(rows)
+    while i < n:
+        if len(rows[i]["cells"]) >= 2:
+            j = i + 1
+            while (j < n and len(rows[j]["cells"]) >= 2
+                   and rows[j]["y0"] - rows[j - 1]["y1"] < 1.2 * (rows[j - 1]["y1"] - rows[j - 1]["y0"]) + 10):
+                j += 1
+            got = _grid_table(rows[i:j]) if j - i >= 3 else None
+            if got:
+                if buf:
+                    parts.append(("rows", buf))
+                    buf = []
+                parts.append(("table", got[0]))
+                i += got[1]
+                continue
+        buf.append(rows[i])
+        i += 1
+    if buf:
+        parts.append(("rows", buf))
+    return parts
 
 
 def _text_blocks(lines, margin):
     """Lines (no tables) -> paragraph and code blocks."""
     if not lines:
         return []
-    flags = [bool(CODE_LINE.match(l["text"].strip())) for l in lines]
+    flags = [bool(l.get("mono")) or bool(CODE_LINE.match(l["text"].strip())) for l in lines]
     code = [False] * len(lines)
     i = 0
     while i < len(lines):  # a run of code-looking lines counts as code when it is long enough and looks like code
@@ -169,7 +275,7 @@ def _text_blocks(lines, margin):
             while j < len(lines) and flags[j]:
                 j += 1
             run = "\n".join(l["text"] for l in lines[i:j])
-            if j - i >= 2 and CODE_HINT.search(run):
+            if j - i >= 2 and (CODE_HINT.search(run) or all(l.get("mono") for l in lines[i:j])):
                 for k in range(i, j):
                     code[k] = True
             i = j
@@ -216,6 +322,9 @@ def find_layout(doc, qs, skip=(), starts_bands=None, images=None):
     images = images or {}
     tabs = {}
     out = {}
+    sheet = _detect_sheet(doc, pg, tabs)  # question-sheet PDF: its big table is page layout, not content
+    if sheet:
+        tabs.clear()
     for k in range(len(qs)):
         if k not in bands or k in images:
             continue
@@ -224,7 +333,7 @@ def find_layout(doc, qs, skip=(), starts_bands=None, images=None):
         for bi, (p, top, bot) in enumerate(bands[k]):
             page = doc[p]
             if p not in tabs:
-                tabs[p] = _tables_on(page, pg.drawings(p))
+                tabs[p] = [] if sheet else _tables_on(page, pg.drawings(p))
             H = page.rect.height
             lines = [l for l in pg.lines(p, top, bot)  # no running header / footer, no loose "Q.5" label
                      if l["y1"] > 0.06 * H and l["y0"] < 0.935 * H and not RE_QALONE.match(l["text"])]
@@ -245,7 +354,7 @@ def find_layout(doc, qs, skip=(), starts_bands=None, images=None):
             for l in lines:
                 cy = (l["y0"] + l["y1"]) / 2
                 if not any(b[0] - 2 <= (l["x0"] + l["x1"]) / 2 <= b[2] + 2 and b[1] - 2 <= cy <= b[3] + 2 for b in boxes):
-                    items.append((p, l["y0"], "line", dict(l, p=p)))
+                    items.append((p, l["y0"], "line", dict(l, p=p, mono=pg.is_mono(p, l))))
                     margin_lines.append(l)
             if cut is not None:
                 break
@@ -256,14 +365,24 @@ def find_layout(doc, qs, skip=(), starts_bands=None, images=None):
         margin = max((l["x1"] for l in full), default=max((l["x1"] for l in margin_lines), default=0))
 
         blocks, seg = [], []
+
+        def flush(seg):
+            out = []
+            for kind, payload in _split_tables(_merge_rows(seg)):
+                if kind == "table":
+                    out.append(payload)
+                else:
+                    out += _text_blocks(payload, margin)
+            return out
+
         for _p, _y, kind, payload in items:
             if kind == "line":
                 seg.append(payload)
             else:
-                blocks += _text_blocks(_merge_rows(seg), margin)
+                blocks += flush(seg)
                 seg = []
                 blocks += payload
-        blocks += _text_blocks(_merge_rows(seg), margin)
+        blocks += flush(seg)
 
         # drop the "Q.12" label in front of the first paragraph
         for b in blocks:
@@ -272,6 +391,7 @@ def find_layout(doc, qs, skip=(), starts_bands=None, images=None):
                 break
         blocks = [b for b in blocks if b["t"] != "p" or b["x"]]
 
+        has_table = has_table or any(b["t"] == "table" for b in blocks)
         has_code = any(b["t"] == "code" for b in blocks)
         n_items = sum(1 for l in _merge_rows(margin_lines) if RE_LISTITEM.match(l["text"]))
         if has_table or has_code or n_items >= 2:

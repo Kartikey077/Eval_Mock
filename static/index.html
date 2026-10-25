@@ -60,7 +60,9 @@ table.qt{border-collapse:collapse;font-size:.95rem}
 table.qt caption{caption-side:top;text-align:left;font-weight:600;padding:0 0 4px}
 table.qt th,table.qt td{border:1px solid var(--line);padding:5px 12px;text-align:left;white-space:pre-wrap;vertical-align:top}
 table.qt th{background:var(--bg)}
-.qprev{border-left:3px solid var(--line);padding-left:12px;margin:8px 0}
+.qprev{border:1px dashed var(--line);border-radius:8px;padding:6px 12px;margin:14px 0 0}
+.qprev summary{cursor:pointer;color:var(--mute);font-size:.9rem}
+.qprev[open] summary{margin-bottom:6px}
 .figs{margin:8px 0}
 .fig{display:block;max-width:100%;height:auto;margin:6px 0;background:#fff;border:1px solid var(--line);border-radius:6px}
 </style>
@@ -203,7 +205,8 @@ function viewVerify() {
       const qt = h("textarea", { "aria-label": `Question ${qi + 1} text`, oninput: e => { q.question = e.target.value; if (q.blocks) { q.blocks = null; if (prev) prev.remove(); } upd(); } });
       qt.value = q.question;
       const qb = qbody(q);
-      if (qb) prev = h("div", { class: "qprev" }, h("p", { class: "mute small", style: "margin:0 0 2px" }, "How students will see this question (editing the text above switches to plain text):"), qb);
+      if (qb) prev = h("details", { class: "qprev" }, h("summary", {}, "Preview: how this question looks in the test (table / code layout)"),
+        h("p", { class: "mute small", style: "margin:0 0 4px" }, "Read-only. If you edit the question text above, this question switches to plain text."), qb);
       const typeSel = h("select", { "aria-label": "Question type", style: "width:auto", onchange: e => { q.hint = false; setType(q, e.target.value); render(); refresh(); } },
         TYPES.map(t => h("option", { value: t, selected: q.type === t }, t)));
       let body;
@@ -232,7 +235,8 @@ function viewVerify() {
       return h("div", { class: "card" },
         h("div", { class: "qhead" }, h("div", { class: "row" }, h("b", {}, `Question ${qi + 1}`), typeSel, hintTag, optTag, tag, aiTag),
           h("button", { class: "danger", onclick: () => { questions.splice(qi, 1); render(); refresh(); } }, "Remove")),
-        qt, prev, figs(q), body);
+        qt, q.images && q.images.length ? h("p", { class: "mute small", style: "margin:10px 0 0" }, "Picture cut from the PDF (students see it with the question):") : null,
+        figs(q), body, prev);
     }));
   }
   const sugBtn = h("button", { class: "ghost", onclick: suggest }, "Suggest missing answers and types with AI");

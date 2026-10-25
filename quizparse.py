@@ -45,7 +45,7 @@ def clean_pages(pages):
         return re.sub(r"\d+", "#", re.sub(r"\s+", " ", l.strip().lower()))
 
     def candidate(l):
-        return len(l.strip()) >= 15 and not (RE_OPT.match(l) or RE_Q.match(l) or RE_QNUM.match(l) or RE_ANS.match(l))
+        return len(l.strip()) >= 10 and not (RE_OPT.match(l) or RE_Q.match(l) or RE_QNUM.match(l) or RE_ANS.match(l))  # 10: 'Page 12 of 41'
 
     cnt = Counter()
     for p in pages:
@@ -160,7 +160,7 @@ def _parse_lines(lines):
             continue
         parts = re.split(r"\s+(?=\(?[A-Ea-e][\.\)]\s)", ln)  # several options on one line
         ms = [RE_OPT.match(p) for p in parts]
-        if cur is not None and all(ms):
+        if cur is not None and all(ms) and (cur["options"] or ms[0].group(1).upper() == "A"):  # options start at A: "...also in B." is text
             for mm in ms:
                 last = mm.group(1).upper()
                 cur["options"][last] = mm.group(2).strip()
@@ -284,10 +284,24 @@ def rows_text(page, tol=3):
             rows[-1][1].append(w)
         else:
             rows.append([yc, [w]])
-    lines = [[yc, " ".join(w[4] for w in sorted(ws, key=lambda w: w[0]))] for yc, ws in rows]
-    out = []
-    for k, (yc, t) in enumerate(lines):
+    # [centre y, text, top, bottom, left, right] per row
+    lines = [[yc, " ".join(w[4] for w in sorted(ws, key=lambda w: w[0])),
+              min(w[1] for w in ws), max(w[3] for w in ws), min(w[0] for w in ws), max(w[2] for w in ws)]
+             for yc, ws in rows]
+    out, pos = [], {}  # pos: row index -> its place in out
+    for k in range(len(lines)):
+        yc, t, y0, y1, x0, x1 = lines[k]
         if re.fullmatch(r"Q\.?\s*\d+", t.strip()):  # a lone "Q.46" label sitting a few points off its text line
+            # text to the right of the label that overlaps it vertically: the label belongs to the TOPMOST such row
+            # (in question-sheet PDFs the label can sit lower than the first line of its cell)
+            cand = [j for j in range(len(lines)) if j != k and lines[j][4] > x1 - 1
+                    and lines[j][3] > y0 + 0.5 and lines[j][2] < y1 - 0.5]
+            if cand and min(cand) < k and min(cand) in pos:
+                out[pos[min(cand)]][1] = t.strip() + " " + out[pos[min(cand)]][1]
+                continue
+            if cand and min(cand) > k:
+                lines[min(cand)][1] = t.strip() + " " + lines[min(cand)][1]
+                continue
             dprev = yc - out[-1][0] if out else 99
             dnext = lines[k + 1][0] - yc if k + 1 < len(lines) else 99
             if min(dprev, dnext) <= 12:
@@ -296,6 +310,7 @@ def rows_text(page, tol=3):
                 else:
                     lines[k + 1][1] = t.strip() + " " + lines[k + 1][1]
                 continue
+        pos[k] = len(out)
         out.append([yc, t])
     return "\n".join(t for _, t in out)
 
