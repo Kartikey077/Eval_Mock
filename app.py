@@ -1,8 +1,9 @@
-"""Mock Test Maker - Version 2.9  (text/OCR -> rules -> AI fallback; MCQ, MSQ, NAT)
+"""Mock Test Maker - Version 3.1  (text/OCR -> rules -> AI fallback; MCQ, MSQ, NAT)
 Local run:   flask --app app run --debug      ->  http://localhost:5000   (debug ONLY on your own computer)
 Deployed:    gunicorn app:app --workers 1 --threads 4 --timeout 180 --access-logfile - --error-logfile -
 """
 import difflib
+import gc
 import logging
 import os
 import re
@@ -10,12 +11,12 @@ import time
 from pathlib import Path
 
 import pymupdf
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, g, jsonify, request, send_file
 from werkzeug.exceptions import HTTPException
 
 import llm
 import ocr
-from figures import find_figures, question_bands
+from figures import Pages, find_figures, question_bands
 from layout import find_layout
 from quizparse import (best_text_parse, complete, has_options, image_based, needs_ai,
                        parse_with_info, problems, quality_ok)
@@ -36,9 +37,9 @@ log = logging.getLogger("mocktest")
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
 
-VERSION = "2.9"
+VERSION = "3.1"
 AI_LIMIT = int(os.getenv("AI_DAILY_LIMIT", "40"))  # AI calls per visitor per day (protects the free quota)
-MAX_PAGES = int(os.getenv("MAX_PAGES", "150"))
+MAX_PAGES = int(os.getenv("MAX_PAGES", "70"))
 _uses = {}
 
 
@@ -112,6 +113,22 @@ def on_error(e):
     return jsonify(error="Something went wrong on the server. Please try again."), 500
 
 
+@app.teardown_request
+def cleanup(exc):
+    """Runs after EVERY request (also after errors): close the PDF and give memory back."""
+    doc = g.pop("doc", None)
+    if doc is not None:
+        try:
+            doc.close()
+        except Exception:
+            pass
+    try:
+        pymupdf.TOOLS.store_shrink(100)  # empty MuPDF's internal cache
+    except Exception:
+        pass
+    gc.collect()
+
+
 @app.get("/")
 def home():
     for p in (BASE / "static" / "index.html", BASE / "index.html"):
@@ -134,14 +151,19 @@ def extract():
     force = request.form.get("force_ai") == "1"
     try:
         doc = pymupdf.open(stream=f.read(), filetype="pdf")
-        pages = [p.get_text("text") for p in doc]
+        g.doc = doc  # closed by cleanup() on every exit path
     except Exception:
         log.exception("Could not open PDF %s", f.filename)
         return jsonify(error="This file could not be read as a PDF."), 400
-    if not pages:
+    if doc.page_count == 0:
         return jsonify(error="This PDF has no pages."), 400
-    if len(pages) > MAX_PAGES:
-        return jsonify(error=f"This PDF has {len(pages)} pages. The limit is {MAX_PAGES}."), 400
+    if doc.page_count > MAX_PAGES:  # checked BEFORE any text is read
+        return jsonify(error=f"This PDF has {doc.page_count} pages. The limit is {MAX_PAGES}."), 400
+    try:
+        pages = [p.get_text("text") for p in doc]
+    except Exception:
+        log.exception("Could not read PDF text %s", f.filename)
+        return jsonify(error="This file could not be read as a PDF."), 400
     log.info("Extract: %s, %d pages, force_ai=%s", f.filename, len(pages), force)
 
     # 1. Scanned pages -> OCR
@@ -164,11 +186,14 @@ def extract():
     # 2b. Diagrams and layout: cut pictures out of the pages (questions whose options are pictures get
     #     "(see figure)" options) and rebuild tables / program code / lists so they are readable
     try:
-        sb = question_bands(doc, qs, set(blank))
-        images, pic = find_figures(doc, qs, set(blank), starts_bands=sb)
+        pg = Pages(doc)  # one page cache shared by the three steps
+        nb = bool(info.get("numbered"))  # paper numbered 1) 2) 3) instead of Q1.
+        sb = question_bands(doc, qs, set(blank), pg, nb)
+        images, pic = find_figures(doc, qs, set(blank), starts_bands=sb, pg=pg, numbered=nb)
         if pic:
             qs, info = parse_with_info(text, pic)
-        layout = find_layout(doc, qs, set(blank), sb, images)
+        layout = find_layout(doc, qs, set(blank), sb, images, pg=pg, numbered=nb)
+        del pg
         for i, q in enumerate(qs):
             if i in images:
                 q["images"] = images[i]
@@ -251,7 +276,6 @@ def extract():
     if "OCR" in used and "AI" not in used:
         notes.append("Read with OCR: symbols and maths may be misread, so check the questions" + (' or press "Re-read PDF with AI".' if llm.available() else "."))
     method = ("OCR" if "OCR" in used else "Pictures" if unreadable else "Text") + (" + AI" if "AI" in used else "")
-    doc.close()
     return jsonify(filename=f.filename, questions=qs, method=method, notes=notes)
 
 

@@ -7,11 +7,19 @@ LET = r"\(?[A-Ea-e]\)?"
 LETTERS = rf"{LET}(?:\s*(?:,|;|&|/|and)?\s*{LET})*"
 VALUE = rf"(?:{LETTERS}(?!\w)|{NUM}(?:\s*(?:to|[–—-])\s*{NUM})?)"
 
-# "Q.1 text", "Q. 4 text", "Q1. text", "1. text", "1) text"
-RE_Q = re.compile(r"^\s*(?:Q(?:uestion)?\s*\.?\s*(\d+)\s*[\.\):\-]?|(\d+)\s*[\.\):\-])\s+(.+)", re.I)
+# a question starts ONLY with "Q.1 text", "Q. 4 text", "Q1. text", "Question 5 text" (never with a bare "1." / "1)")
+RE_Q = re.compile(r"^\s*Q(?:uestion)?\s*\.?\s*(\d+)\s*[\.\):\-]?\s+(.+)", re.I)
 RE_QALONE = re.compile(r"^\s*Q(?:uestion)?\s*\.?\s*(\d+)\s*[\.\):]?\s*$", re.I)  # "Q.46" alone, text on next line
 RE_RANGE = re.compile(r"^\s*Q\.?\s*\d+\s*[–—-]\s*Q\.?\s*\d+", re.I)  # "Q.6 – Q.10 Carry TWO marks Each"
-RE_OPT = re.compile(r"^\s*\(?([A-Ea-e])[\.\)]\s+(.+)")
+RE_OPT = re.compile(r"^\s*(?:\(?([A-Ea-e])[\.\)]|\(([1-5])\))\s+(.+)")  # (a) a. A) and (1) (2): digits become A B C
+
+
+def opt_match(p):
+    """(letter, text) when p starts an option, else None. '(1)' is read as option A, '(2)' as B ..."""
+    m = RE_OPT.match(p)
+    if not m:
+        return None
+    return (m.group(1).upper() if m.group(1) else chr(64 + int(m.group(2)))), m.group(3).strip()
 RE_ANS = re.compile(r"^\s*(?:correct\s+(?:answers?|options?)|answers?|ans\.?)\s*[:\-.]?\s*(.+)", re.I)
 RE_EXP = re.compile(r"^\s*(?:explanation|solution|reason)\s*[:\-]\s*(.*)", re.I)
 RE_KEY = re.compile(r"^\s*(?:answer\s*key|answers|solutions?)\s*:?\s*(.*)$", re.I)
@@ -36,8 +44,39 @@ RE_TAILLABELS = re.compile(r"(?:\s*\([A-Ea-e]\))+\s*$")
 RE_ROW = re.compile(r"(?<!\d)(\d{1,3})\s+\d+\s+(MCQ|MSQ|NAT)\s+\S+\s+(.+?)\s+\d+(?:\.\d+)?\s*$")
 
 
-def clean_pages(pages):
-    """Join page texts, dropping headers/footers that repeat on many pages (e.g. 'Page 3 of 42')."""
+def option_parts(ln):
+    """[(letter, text)] for the options on one line, or None. Several options on one line ('(a) x (b) y') are split
+    only when their letters run in order (a, b, c...). So '(d) Both (a) and (b) are correct' stays ONE option."""
+    parts = re.split(r"\s+(?=\(?[A-Ea-e][\.\)]\s|\([1-5]\)\s)", ln)
+    ms = [opt_match(p) for p in parts]
+    if all(ms):
+        ls = [ord(m[0]) for m in ms]
+        if all(b == a + 1 for a, b in zip(ls, ls[1:])):
+            return ms
+    m = opt_match(ln)
+    return [m] if m else None
+
+
+def _join_lines(lines):
+    """Question text from raw lines: list items (A. / 1. / I. / List) start a new line, the rest is joined."""
+    out = ""
+    for l in lines:
+        if not out:
+            out = l
+        elif re.match(r"^(?:[A-Ea-e][\.\)]|\d+[\.\)]|[IVX]{1,4}[\.\)]|List\b|Codes?\b)", l):
+            out += "\n" + l
+        else:
+            out += " " + l
+    return out
+
+
+RE_META = re.compile(r"\[\s*(?:Question|Option)\s*(?:ID|Description)\b", re.I)  # "[Question ID = 12]", "[Option ID = 7]"
+
+
+def clean_pages(pages, edge=4):
+    """Join page texts, dropping running headers / footers ('Page 3 of 42'). Only the first and last few lines
+    of a page can be a header / footer, and a line that repeats on many pages is only removed from there, so
+    question text and "[Question ID = ..]" style tags in the middle of a page are never touched."""
     if len(pages) < 4:
         return "\n".join(pages)
 
@@ -45,14 +84,25 @@ def clean_pages(pages):
         return re.sub(r"\d+", "#", re.sub(r"\s+", " ", l.strip().lower()))
 
     def candidate(l):
-        return len(l.strip()) >= 10 and not (RE_OPT.match(l) or RE_Q.match(l) or RE_QNUM.match(l) or RE_ANS.match(l))  # 10: 'Page 12 of 41'
+        return (len(l.strip()) >= 10 and not RE_META.search(l)
+                and not (RE_OPT.match(l) or RE_Q.match(l) or RE_QNUM.match(l) or RE_ANS.match(l)))  # 10: 'Page 12 of 41'
+
+    def edges(p):
+        ls = [x for x in p.splitlines() if x.strip()]
+        return ls[:edge] + ls[-edge:]
 
     cnt = Counter()
     for p in pages:
-        for n in {norm(x) for x in p.splitlines() if candidate(x)}:
+        for n in {norm(x) for x in edges(p) if candidate(x)}:
             cnt[n] += 1
     bad = {n for n, c in cnt.items() if c >= max(3, len(pages) // 2)}
-    return "\n".join(x for p in pages for x in p.splitlines() if norm(x) not in bad)
+    out = []
+    for p in pages:
+        ls = p.splitlines()
+        nz = [i for i, x in enumerate(ls) if x.strip()]
+        edge_idx = set(nz[:edge] + nz[-edge:])
+        out += [x for i, x in enumerate(ls) if not (i in edge_idx and candidate(x) and norm(x) in bad)]
+    return "\n".join(out)
 
 
 def parse_answer(raw):
@@ -68,8 +118,11 @@ def parse_answer(raw):
 
 
 def _finalize(q, a, kt=None):
+    q.pop("_raw", None)
     q["question"] = q["question"].strip()
     if q["options"]:
+        if isinstance(a, dict) and a["min"] == a["max"] and a["min"] == int(a["min"]) and 1 <= a["min"] <= len(q["options"]):
+            a = [chr(64 + int(a["min"]))]  # key given as the option NUMBER
         letters = a if isinstance(a, list) else []
         multi = len(letters) > 1 or (kt == "MSQ" and bool(letters))
         q["type"] = "MSQ" if multi else "MCQ"
@@ -134,10 +187,25 @@ def _split_key(lines):
     return key, keep, {}
 
 
-def _parse_lines(lines):
+RE_NQ = re.compile(r"^\s*(\d{1,3})\s*[\.\)]\s+(\S.*)$")  # "12. text" / "12) text" (only used by the numbered fallback)
+RE_QID = re.compile(r"\[\s*Question\s*ID\s*=\s*\d+\s*\]\s*(?:\[\s*Question\s*Description\s*=[^\]]*\])?", re.I)
+RE_OID = re.compile(r"\[\s*Option\s*ID\s*=\s*\d+\s*\]", re.I)
+TQ, TO = "\u00a7Q\u00a7", "\u00a7O\u00a7"  # stand-ins for "[Question ID..]" and "[Option ID..]"
+
+
+def _parse_lines(lines, numbered=False):
+    """numbered=False: a question starts ONLY with Q / Q. / Q1 / Question (sub-parts "1." "2." never start one).
+    numbered=True (fallback for papers numbered "1." / "1)"): a bare number starts a question only when it is the
+    next number in order AND the previous question already has its options or answer, so statements
+    '1. ... 2. ...' inside a question can never start a new one."""
     qs, cur, last = [], None, None
+
+    def keep(ln):  # remember the raw line (used when 'A. B. C.' list items turn out not to be options)
+        if cur is not None and cur.get("_raw") is not None:
+            cur["_raw"].append(ln)
+
     for ln in lines:
-        if RE_RANGE.match(ln):  # section heading like "Q.6 – Q.10 Carry TWO marks Each"
+        if RE_RANGE.match(ln):  # section heading like "Q.6 - Q.10 Carry TWO marks Each"
             last = None
             continue
         m = RE_QNUM.match(ln)
@@ -145,7 +213,7 @@ def _parse_lines(lines):
             if cur and cur["question"].strip():
                 qs.append(cur)
             cur = {"id": int(re.sub(r"\s+", "", m.group(1))), "type": "MCQ", "question": "",
-                   "options": {}, "answer": None, "explanation": ""}
+                   "options": {}, "answer": None, "explanation": "", "_raw": []}
             last = "q"
             continue
         m = RE_ANS.match(ln)
@@ -158,25 +226,45 @@ def _parse_lines(lines):
         if m and cur is not None:
             cur["explanation"], last = m.group(1).strip(), "exp"
             continue
-        parts = re.split(r"\s+(?=\(?[A-Ea-e][\.\)]\s)", ln)  # several options on one line
-        ms = [RE_OPT.match(p) for p in parts]
-        if cur is not None and all(ms) and (cur["options"] or ms[0].group(1).upper() == "A"):  # options start at A: "...also in B." is text
-            for mm in ms:
-                last = mm.group(1).upper()
-                cur["options"][last] = mm.group(2).strip()
+        ms = option_parts(ln)
+        if cur is not None and ms and (cur["options"] or ms[0][0] == "A"):  # options start at A: "...also in B." is text
+            if cur["options"] and ms[0][0] in cur["options"] and cur.get("_raw"):
+                # "A. B. C. D." (or "(1) (2) (3)") were a LIST (match-the-following, statements); the real options
+                # come now: put the list back into the question text
+                cur["question"] = _join_lines(cur["_raw"])
+                cur["options"], cur["_raw"] = {}, None
+            else:
+                keep(ln)
+            for letter, text in ms:
+                last = letter
+                cur["options"][letter] = text
             continue
         m = RE_Q.match(ln)
         alone = None if m else RE_QALONE.match(ln)
         if m or alone:
-            num = int((m.group(1) or m.group(2)) if m else alone.group(1))
+            num = int(m.group(1) if m else alone.group(1))
             if alone or cur is None or cur["options"] or "_a" in cur or num == cur["id"] + 1:
                 if cur and cur["question"].strip():
                     qs.append(cur)
-                cur = {"id": num, "type": "MCQ", "question": m.group(3).strip() if m else "",
-                       "options": {}, "answer": None, "explanation": ""}
+                cur = {"id": num, "type": "MCQ", "question": m.group(2).strip() if m else "",
+                       "options": {}, "answer": None, "explanation": "",
+                       "_raw": [m.group(2).strip()] if m else []}
                 last = "q"
                 continue
+        if numbered:
+            m = RE_NQ.match(ln)
+            if m:
+                num = int(m.group(1))
+                ready = cur is None or len(cur["options"]) >= 2 or "_a" in cur
+                if ready and ((cur is None and num <= 3) or (cur is not None and num == cur["id"] + 1)):
+                    if cur and cur["question"].strip():
+                        qs.append(cur)
+                    cur = {"id": num, "type": "MCQ", "question": m.group(2).strip(), "options": {},
+                           "answer": None, "explanation": "", "_raw": [m.group(2).strip()]}
+                    last = "q"
+                    continue
         if cur is not None and last:  # wrapped line
+            keep(ln)
             if last == "q":
                 cur["question"] += " " + ln
             elif last == "exp":
@@ -188,12 +276,91 @@ def _parse_lines(lines):
     return qs
 
 
-def parse_with_info(text, picture_opts=None):
-    """Returns (questions, info). info says whether an answer key was found, applied, or rejected.
+RE_NUMOPT = re.compile(r"^\s*(\d)\s*[\.\)]\s*(.*)$")        # "1. text" / "2) text" / "3." (picture option)
+RE_STEMNUM = re.compile(r"^\s*(\d{1,3})\s*[\.\)]\s*(.*)$")  # the question number in front of the first line
+RE_STEMPAREN = re.compile(r"^\s*(\d{1,3})\s*\)\s*(.*)$")
+
+
+def _mark(text):
+    """Text of a paper that carries '[Question ID = 12][Question Description = ..]' and '[Option ID = 5]' tags
+    (exam-portal exports): the tags become one-line markers. The tags are found in the whole text, because a tag
+    can be split over two lines or two pages."""
+    return RE_OID.sub(" " + TO + "\n", RE_QID.sub("\n" + TQ + "\n", text))
+
+
+def _parse_marked(lines):
+    """Layout:  <question text>  [Question ID]  1. option [Option ID]  2. option [Option ID] ...
+    The question text is whatever stands before its [Question ID] tag, the options (numbered 1, 2, 3 ...) follow it
+    and each is closed by its [Option ID] tag, so nothing needs to start with 'Q'. Options may be pictures (empty)."""
+    n = len(lines)
+    has_oid = any(TO in l for l in lines)
+
+    def next_token(i):
+        for j in range(i, n):
+            if lines[j] == TQ:
+                return TQ
+            if TO in lines[j]:
+                return TO
+        return None
+
+    qs, stem, i, expected = [], [], 0, 1
+    while i < n:
+        if lines[i] != TQ:
+            stem.append(lines[i])
+            i += 1
+            continue
+        i += 1
+        opts, open_ = {}, None
+        while i < n and lines[i] != TQ:
+            l = lines[i]
+            closed = TO in l
+            body = l.replace(TO, "").strip()
+            m = RE_NUMOPT.match(body)
+            starts = bool(m) and int(m.group(1)) == len(opts) + 1 and len(opts) < 8
+            if starts and has_oid:
+                starts = next_token(i) == TO  # an option is closed by its [Option ID]; a question text is not
+            if starts:
+                open_ = chr(65 + len(opts))
+                opts[open_] = m.group(2).strip()
+                open_ = None if (closed or not has_oid) else open_
+            elif open_ is not None:  # wrapped option text, up to its [Option ID]
+                opts[open_] = (opts[open_] + " " + body).strip()
+                if closed:
+                    open_ = None
+            elif closed and not body:  # a stray [Option ID]
+                pass
+            else:
+                break  # first line of the next question
+            i += 1
+        # the question: skip page titles in front of its number, cut the number off
+        idx = next((k for k, l in enumerate(stem) if (m := RE_STEMNUM.match(l)) and int(m.group(1)) == expected), None)
+        if idx is None:
+            idx = next((k for k, l in enumerate(stem) if RE_STEMPAREN.match(l)), None)
+        body_lines = list(stem if idx is None else stem[idx:])
+        num = expected
+        if idx is not None:
+            m = RE_STEMNUM.match(body_lines[0])
+            num, body_lines[0] = int(m.group(1)), m.group(2)
+        body_lines = [l for l in body_lines if l.strip()]
+        text = _join_lines(body_lines)
+        stem = []
+        if not text and not opts:
+            continue
+        for L in opts:
+            opts[L] = opts[L] or "(see figure)"
+        qs.append({"id": num, "type": "MCQ", "question": text or "(see figure)", "options": opts,
+                   "answer": None, "explanation": ""})
+        expected = num + 1
+    return qs
+
+
+def _run(text, picture_opts, parser, use_key=True):
+    """text -> (questions, info) with one line parser. info says whether an answer key was found, applied or rejected.
     picture_opts = {position in list: ['A','B','C','D']} for questions whose options are pictures: those options
     get the text "(see figure)" so the question, the answer key and the test all work normally."""
-    key, lines, ktypes = _split_key([l.strip() for l in text.splitlines() if l.strip()])
-    qs = _parse_lines(lines)
+    raw = [l.strip() for l in text.splitlines() if l.strip()]
+    key, lines, ktypes = _split_key(raw) if use_key else ({}, raw, {})
+    qs = parser(lines)
     for pos, q in enumerate(qs):
         letters = (picture_opts or {}).get(pos)
         if letters:
@@ -212,7 +379,8 @@ def parse_with_info(text, picture_opts=None):
             kt, has = ktypes.get(n), bool(q["options"])
             if ((kt == "NAT" and has) or (kt in ("MCQ", "MSQ") and not has)
                     or (isinstance(a, list) and (not has or any(x not in q["options"] for x in a)))
-                    or (isinstance(a, dict) and has)):
+                    or (isinstance(a, dict) and has and not (a["min"] == a["max"] and a["min"] == int(a["min"])
+                                                              and 1 <= a["min"] <= len(q["options"])))):
                 info["mismatch"].append(n)
         if len(info["mismatch"]) >= 3:  # key clearly belongs to another paper: never apply it
             key, ktypes = {}, {}
@@ -223,6 +391,29 @@ def parse_with_info(text, picture_opts=None):
         a = q.pop("_a", None)
         out.append(_finalize(q, key.get(q["id"]) if a is None else a, ktypes.get(q["id"])))
     return out, info
+
+
+def parse_with_info(text, picture_opts=None):
+    """Returns (questions, info). Strategy 1 (always first): a question starts with Q / Q. / Q1 / Question.
+    Only when that gives little or poor results the other layouts are tried (tagged exam-portal exports, then
+    papers numbered '1.' / '1)'), and one of them is used only when it clearly finds more usable questions.
+    info['dialect'] says which was used, info['numbered'] is True for the two fallbacks."""
+    qs, info = _run(text, picture_opts, _parse_lines)
+    info["dialect"], info["numbered"] = "q", False
+    if len(qs) >= 5 and quality_ok(qs):
+        return qs, info
+    best, best_score = (qs, info), _score(qs)
+    cands = []
+    if len(RE_QID.findall(text)) >= 3:
+        cands.append(("marked", lambda: _run(_mark(text), picture_opts, _parse_marked, use_key=False)))
+    cands.append(("numbered", lambda: _run(text, picture_opts, lambda L: _parse_lines(L, True))))
+    for name, fn in cands:
+        q2, i2 = fn()
+        sc = _score(q2)
+        if sc > max(1.25 * best_score, 2):
+            i2["dialect"], i2["numbered"] = name, True
+            best, best_score = (q2, i2), sc
+    return best
 
 
 def parse_questions(text):
@@ -244,8 +435,11 @@ def quality_ok(qs, strict=False):
     A paper with no answers at all is judged on structure only (answers can be added later)."""
     if not qs:
         return False
-    ids = {q["id"] for q in qs}
-    if len(qs) >= 5 and len(ids) < 0.9 * (max(ids) - min(ids) + 1):  # numbering has gaps: questions were lost
+    seq = [q["id"] for q in qs]
+    ids = set(seq)
+    steps = [b - a for a, b in zip(seq, seq[1:])]
+    sequential = bool(steps) and sum(1 for x in steps if x == 1) >= 0.6 * len(steps)  # a compilation (1, 3, 5, 10, 13...) is not sequential
+    if sequential and len(qs) >= 5 and len(ids) < 0.9 * (max(ids) - min(ids) + 1):  # numbering has gaps: questions were lost
         return False
     check = structured if all(not q["answer"] for q in qs) else complete
     return sum(map(check, qs)) / len(qs) >= (1.0 if strict else 0.9)
@@ -266,17 +460,71 @@ def problems(qs):
 
 
 def needs_ai(qs, strict=False):
-    """True when AI re-reading is worth trying (broken questions, or quality below threshold)."""
-    if not quality_ok(qs, strict):
+    """True only when the normal reader clearly failed: no questions, or fewer than 60% of them usable
+    (90% for OCR text). A few flagged questions are NOT sent to the AI (it costs quota and often changes nothing):
+    they are listed in the notes and marked in the Verify screen, and 'Re-read PDF with AI' stays available."""
+    if not qs:
         return True
-    incomplete, few = problems(qs)
-    return bool(incomplete or few)
+    check = structured if all(not q["answer"] for q in qs) else complete
+    return sum(map(check, qs)) / len(qs) < (0.9 if strict else 0.6)
+
+
+SUP = str.maketrans("0123456789+-\u2010\u2212\u2013n", "\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079\u207a\u207b\u207b\u207b\u207b\u207f")
+SUB = str.maketrans("0123456789+-\u2010\u2212\u2013", "\u2080\u2081\u2082\u2083\u2084\u2085\u2086\u2087\u2088\u2089\u208a\u208b\u208b\u208b\u208b")
+
+
+def _scripts(page, words):
+    """{id(word): 'sup' | 'sub'} for small raised / lowered words that touch the word before them
+    (the 2 in 'km2', the 4 in 'H2SO4', the -1 in 'LT-1'). Such digits are separate words in the PDF, which
+    would otherwise read '1000 km 2 hilly' and 'H 2 SO 4'."""
+    try:
+        spans = [s for b in page.get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]]
+    except Exception:
+        return {}
+    sizes = Counter(round(s["size"]) for s in spans if len(s["text"].strip()) > 5)
+    if not sizes:
+        return {}
+    main = sizes.most_common(1)[0][0]
+    out = {}
+    for s in spans:
+        t = s["text"].strip()
+        if not t or len(t) > 4 or s["size"] >= 0.8 * main:
+            continue
+        sx0, sy0, sx1, sy1 = s["bbox"]
+        sc = (sy0 + sy1) / 2
+        prev = [w for w in words if -1.5 <= sx0 - w[2] <= 0.8 and w[1] < sy1 and w[3] > sy0 and w[3] - w[1] > s["size"] * 1.05]
+        me = [w for w in words if w[4] == t and sx0 - 0.8 <= (w[0] + w[2]) / 2 <= sx1 + 0.8 and sy0 - 0.8 <= (w[1] + w[3]) / 2 <= sy1 + 0.8]
+        if not prev or not me:
+            continue
+        d = sc - (prev[-1][1] + prev[-1][3]) / 2
+        if d < -0.8:
+            out[id(me[0])] = "sup"
+        elif d > 0.8:
+            out[id(me[0])] = "sub"
+    return out
+
+
+def _join_words(ws, scripts):
+    out, prev = "", None
+    for w in ws:
+        t, k = w[4], scripts.get(id(w))
+        if k and out:
+            ok = all(c in "0123456789+-\u2010\u2212\u2013" + ("n" if k == "sup" else "") for c in t)
+            out += t.translate(SUP if k == "sup" else SUB) if ok else ("^" if k == "sup" else "_") + t
+        elif (prev is not None and scripts.get(id(prev)) and w[0] - prev[2] < 1.5
+              and (t[:1] in ",.;:)]" or t[:1].isupper() or t[:1].isdigit())):
+            out += t  # 'SO' right after the subscript of 'H2', but 'H2SO4 and' keeps its space
+        else:
+            out += (" " if out else "") + t
+        prev = w
+    return out
 
 
 def rows_text(page, tol=3):
     """Rebuild text row by row from word positions. Fixes tables where every cell ('(A)' | 'Accelerate')
     is otherwise returned on its own line."""
     words = sorted(page.get_text("words"), key=lambda w: ((w[1] + w[3]) / 2, w[0]))
+    scripts = _scripts(page, words)
     rows = []
     for w in words:
         yc = (w[1] + w[3]) / 2
@@ -285,7 +533,7 @@ def rows_text(page, tol=3):
         else:
             rows.append([yc, [w]])
     # [centre y, text, top, bottom, left, right] per row
-    lines = [[yc, " ".join(w[4] for w in sorted(ws, key=lambda w: w[0])),
+    lines = [[yc, _join_words(sorted(ws, key=lambda w: w[0]), scripts),
               min(w[1] for w in ws), max(w[3] for w in ws), min(w[0] for w in ws), max(w[2] for w in ws)]
              for yc, ws in rows]
     out, pos = [], {}  # pos: row index -> its place in out
@@ -326,7 +574,7 @@ def image_based(page, text):
         return True
     if has_options(t) or re.search(r"\(\s*[A-Ea-e]\s*\)\s*\S", t):
         return False
-    return len(re.sub(r"\s+", " ", t)) < 300 and bool(page.get_images())  # a picture with only a few header words of real text
+    return len(re.sub(r"\s+", " ", t)) < 300 and bool(page.get_image_info())  # a picture with only a few header words of real text
 
 
 def _score(qs):

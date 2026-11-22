@@ -4,7 +4,7 @@ import sys
 
 import pymupdf
 
-from figures import find_figures, question_bands
+from figures import Pages, find_figures, question_bands
 from layout import find_layout
 from quizparse import best_text_parse, complete, quality_ok
 
@@ -19,12 +19,14 @@ for l in [l for l in text.splitlines() if l.strip()][:30]:
 bad = [q["id"] for q in qs if not complete(q)]
 print(f"\n--- parsed {len(qs)} questions; without answer/options: {len(bad)} ---")
 print("Types:", {t: sum(1 for q in qs if q["type"] == t) for t in ("MCQ", "MSQ", "NAT")})
-print("Answer key:", info)
+print("Answer key / layout used:", info)
 for q in qs[:5]:
     print(q["id"], q["type"], "| options:", len(q["options"]), "| answer:", q["answer"], "|", q["question"][:50])
-sb = question_bands(doc, qs)
-imgs, pic = find_figures(doc, qs, starts_bands=sb)
-lay = find_layout(doc, qs, starts_bands=sb, images=imgs)
+pg = Pages(doc)
+nb = bool(info.get("numbered"))
+sb = question_bands(doc, qs, pg=pg, numbered=nb)
+imgs, pic = find_figures(doc, qs, starts_bands=sb, pg=pg, numbered=nb)
+lay = find_layout(doc, qs, starts_bands=sb, images=imgs, pg=pg, numbered=nb)
 print("\nQuestions with a diagram/picture (screen numbers):", [i + 1 for i in sorted(imgs)] or "none",
       "| picture options:", [i + 1 for i in sorted(pic)] or "none")
 print("Questions with a table / code / list layout (screen numbers):", [i + 1 for i in sorted(lay)] or "none")

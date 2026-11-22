@@ -25,5 +25,10 @@ def available():
 def page_text(page):
     from PIL import Image
     pt = _setup()
-    img = Image.open(io.BytesIO(page.get_pixmap(dpi=200).tobytes("png")))
-    return pt.image_to_string(img, config="--psm 4")
+    pix = page.get_pixmap(dpi=200)
+    img = Image.open(io.BytesIO(pix.tobytes("png")))
+    pix = None  # free the pixmap now
+    try:
+        return pt.image_to_string(img, config="--psm 4")
+    finally:
+        img.close()

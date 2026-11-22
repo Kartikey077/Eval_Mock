@@ -14,6 +14,7 @@ import re
 import pymupdf
 
 from figures import RE_ANSLINE, RE_OPTLINE, RE_SOLLINE, Pages, question_bands
+from quizparse import RE_META
 
 RE_SHEETCELL = re.compile(r"^(?:Q\.?\d+\.?|\(?[A-Ea-e]\)?\.?)?$")  # first column of a question sheet: Q.5, (A), empty
 
@@ -45,7 +46,7 @@ def _detect_sheet(doc, pg, tabs):
     return False
 
 
-RE_QPREFIX = re.compile(r"^\s*(?:Question\s*Number\s*:\s*\d+|Q(?:uestion)?\s*\.?\s*\d+\s*[\.\):\-]?)\s*", re.I)
+RE_QPREFIX = re.compile(r"^\s*(?:Question\s*Number\s*:\s*\d+|Q(?:uestion)?\s*\.?\s*\d+\s*[\.\):\-]?|\d{1,3}\s*\)(?=\s))\s*", re.I)
 RE_LISTITEM = re.compile(r"^\s*(?:[IVX]{1,4}|S\d{1,2})[\.\)]\s+\S")  # "I. text", "II. text", "S1. text"
 RE_LISTLABEL = re.compile(r"^(?:[IVX]{1,4}|S\d{1,2})[\.\)]$")  # a lone "I." or "S1."
 RE_QALONE = re.compile(r"^\s*Q(?:uestion)?\s*\.?\s*\d+\s*[\.\):]?\s*$", re.I)  # the question label on its own
@@ -70,15 +71,15 @@ CODE_HINT = re.compile(r"[;{}#]|^\s*SELECT\b", re.M)
 def _tables_on(page, drawings):
     """Tables found on a page. Table detection is slow, so it only runs where ruling lines form a grid
     (several horizontal AND vertical lines), and only over the area those lines cover."""
-    H = page.rect.height
+    H, W = page.rect.height, page.rect.width
     hor, ver = [], []
     for d in drawings:
         r = d["rect"]
         if r.y1 < 0.06 * H or r.y0 > 0.935 * H:  # running header / footer rules
             continue
-        if r.width > 20 and r.height < 2.5:
+        if 20 < r.width < 0.92 * W and r.height < 2.5:  # (a rule across the whole page is a frame, not a table)
             hor.append(r)
-        elif r.height > 12 and r.width < 2.5:
+        elif 12 < r.height < 0.5 * H and r.width < 2.5:
             ver.append(r)
     if len(hor) < 3 or len(ver) < 3:
         return []
@@ -87,9 +88,38 @@ def _tables_on(page, drawings):
         area.include_rect(r)
     area = area + (-6, -6, 6, 6)
     try:
-        return page.find_tables(clip=area).tables  # needs PyMuPDF 1.23 or newer
+        found = page.find_tables(clip=area).tables  # needs PyMuPDF 1.23 or newer
     except Exception:
-        return []
+        found = []
+    return found or _grid_from_rules(hor, ver)  # small tables are sometimes missed: rebuild them from their ruling lines
+
+
+class _Grid:
+    """A table rebuilt from ruling lines (same two attributes the library's table has: cells and bbox)."""
+
+    def __init__(self, cells, bbox):
+        self.cells, self.bbox = cells, bbox
+
+
+def _grid_from_rules(hor, ver):
+    ys = _edges([(r.y0 + r.y1) / 2 for r in hor], tol=2.5)
+    groups = []
+    for y in ys:  # horizontal rules close together belong to one table
+        if groups and y - groups[-1][-1] <= 30:
+            groups[-1].append(y)
+        else:
+            groups.append([y])
+    out = []
+    for g in groups:
+        if len(g) < 3:
+            continue
+        vs = [r for r in ver if r.y0 >= g[0] - 6 and r.y1 <= g[-1] + 6]
+        xs = _edges([(r.x0 + r.x1) / 2 for r in vs], tol=2.5)
+        if len(xs) < 3:
+            continue
+        cells = [(xs[i], g[j], xs[i + 1], g[j + 1]) for j in range(len(g) - 1) for i in range(len(xs) - 1)]
+        out.append(_Grid(cells, (xs[0], g[0], xs[-1], g[-1])))
+    return out
 
 
 def _edges(vals, tol=2.5):
@@ -114,6 +144,10 @@ def _cell_text(ws):
     return "\n".join(" ".join(x[4] for x in sorted(r[1], key=lambda w: w[0])) for r in rows).strip()
 
 
+RE_GLUED = re.compile(r"^(.*[a-z\)])((?:VIII|VII|VI|IV|V|III|II|I)\.)\s*(.*)$")
+RE_LABELCELL_START = re.compile(r"^(?:[IVX]{1,4}|[A-Ea-e])[\.\)]")
+
+
 def _table_blocks(words, tab):
     """Rebuild a detected table from word positions (the library's own cell text drops spaces).
     Returns a list of table blocks (a table with an empty spacer column is really two tables), or None."""
@@ -129,6 +163,11 @@ def _table_blocks(words, tab):
         if xs[0] <= cx <= xs[-1] and ys[0] <= cy <= ys[-1]:
             cw[min(nr - 1, bisect.bisect_right(ys, cy) - 1)][min(nc - 1, bisect.bisect_right(xs, cx) - 1)].append(w)
     grid = [[_cell_text(cw[r][c]) for c in range(nc)] for r in range(nr)]
+    for row in grid:  # "Current meterIII. Measurement..." : the roman label of the next column is glued to this cell
+        for c in range(nc - 1):
+            m = RE_GLUED.match(row[c])
+            if m and not RE_LABELCELL_START.match(row[c + 1]):
+                row[c], row[c + 1] = m.group(1), (m.group(2) + " " + m.group(3) + " " + row[c + 1]).strip()
     if sum(1 for row in grid for t in row if t) < 4:
         return None
 
@@ -314,11 +353,11 @@ def _text_blocks(lines, margin):
     return blocks
 
 
-def find_layout(doc, qs, skip=(), starts_bands=None, images=None):
+def find_layout(doc, qs, skip=(), starts_bands=None, images=None, pg=None, numbered=False):
     """Returns {position: [blocks]} for questions that contain a table, code or a list.
     Questions that have a figure are left alone (their layout is the picture)."""
-    starts, bands = starts_bands or question_bands(doc, qs, skip)
-    pg = Pages(doc)
+    pg = pg or Pages(doc)
+    starts, bands = starts_bands or question_bands(doc, qs, skip, pg, numbered)
     images = images or {}
     tabs = {}
     out = {}
@@ -337,8 +376,16 @@ def find_layout(doc, qs, skip=(), starts_bands=None, images=None):
             H = page.rect.height
             lines = [l for l in pg.lines(p, top, bot)  # no running header / footer, no loose "Q.5" label
                      if l["y1"] > 0.06 * H and l["y0"] < 0.935 * H and not RE_QALONE.match(l["text"])]
-            cut = next((l["y0"] for l in lines if RE_OPTLINE.match(l["text"])
+            cut = next((l["y0"] for l in lines if (RE_OPTLINE.match(l["text"]) and not numbered)
                         or RE_ANSLINE.match(l["text"]) or RE_SOLLINE.match(l["text"])), None)
+            meta = next((l for l in lines if RE_META.search(l["text"])), None)  # "[Question ID = ..]": the question ends here
+            if meta is not None and (cut is None or meta["y0"] < cut):
+                pos = RE_META.search(meta["text"]).start()
+                if pos > 0:  # tag glued to the end of the question text: keep the text in front of it
+                    lines = [dict(meta, text=meta["text"][:pos].strip()) if l is meta else l for l in lines]
+                    cut = meta["y1"] - 0.5
+                else:
+                    cut = meta["y0"]
             if cut is not None:
                 lines = [l for l in lines if l["y1"] <= cut + 1]
                 bot = min(bot, cut)

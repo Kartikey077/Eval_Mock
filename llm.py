@@ -162,13 +162,19 @@ def parse_text(text, size=30000, expect=None):
     return clean(items)
 
 
-def parse_images(doc, pages=None, per_call=4, max_pages=80):
+def _page_b64(page):
+    pix = page.get_pixmap(dpi=110)
+    data = base64.b64encode(pix.tobytes("png")).decode()
+    pix = None  # free the pixmap now
+    return data
+
+
+def parse_images(doc, pages=None, per_call=4, max_pages=70):
     """Let the AI read page pictures. pages = page numbers (0-based) to send; default all pages."""
     idx = (list(pages) if pages else list(range(len(doc))))[:max_pages]
     items = []
     for s in range(0, len(idx), per_call):
-        parts = [("image", base64.b64encode(doc[i].get_pixmap(dpi=110).tobytes("png")).decode())
-                 for i in idx[s:s + per_call]]
+        parts = [("image", _page_b64(doc[i])) for i in idx[s:s + per_call]]
         parts.append(("text", "Extract the questions from these pages."))
         items += _ask(parts)
     return clean(items)

@@ -18,10 +18,11 @@ from collections import Counter
 import pymupdf
 from PIL import Image, ImageDraw
 
-from quizparse import RE_LABELONLY, RE_RANGE, junk_option
+from quizparse import RE_LABELONLY, RE_META, RE_RANGE, junk_option
 
 RE_START = re.compile(
-    r"^\s*(?:Question\s*Number\s*:\s*(\d+)|Q(?:uestion)?\s*\.?\s*(\d+)\b|(\d+)\s*[\.\):\-]\s)", re.I)
+    r"^\s*(?:Question\s*Number\s*:\s*(\d+)|Q(?:uestion)?\s*\.?\s*(\d+)\b)", re.I)
+RE_START_NUM = re.compile(r"^\s*(\d{1,3})\s*\)(?:\s|$)")  # "12)" - for papers numbered 1) 2) 3) instead of Q1.
 RE_LABEL = re.compile(r"^(?:\(([A-Ea-e])\)|([A-Ea-e])[\.\)])$")  # a lone "(A)", "A." or "A)"
 RE_OPTLINE = re.compile(r"^\s*(?:\(\s*[A-Ea-e]\s*\)|[A-Ea-e][\.\)])(?:\s|$)")  # a line that starts an option
 # "Answer: B", "Ans. C", "Correct answer - 5"   (but NOT the blank in the question: "Answer: ________")
@@ -31,6 +32,9 @@ RE_SOLLINE = re.compile(r"^\s*(?:explanation|solution|sol\.?|reason|hint)\s*[:\-
 
 DPI = 120
 MAX_FIGURES = 80
+MIN_WEIGHT = 6                 # a real diagram has many curves / diagonals (cards and boxes never reach this)
+MIN_FIG_W, MIN_FIG_H = 40, 25  # smaller shapes are symbols, not figures
+MAX_WIDTH = 900                # wide crops are scaled down
 TOP_MARGIN, BOTTOM_MARGIN = 40, 35  # skip page headers/footers on continuation pages
 SIDE = 30  # text this close to the figure sideways is treated as part of it (axis labels, gate names)
 
@@ -47,11 +51,25 @@ class Pages:
     def __init__(self, doc):
         self.doc = doc
         self._w, self._d, self._l, self._h, self._m, self._furn = {}, {}, {}, {}, {}, None
+        self._i = {}
 
     def words(self, pn):
         if pn not in self._w:
             self._w[pn] = self.doc[pn].get_text("words")
         return self._w[pn]
+
+    def images(self, pn):
+        """Pictures really DRAWN on the page: [(xref, Rect)]. page.get_images() is not used: many PDFs share
+        one resource list, so it reports pictures that are not on the page at all."""
+        if pn not in self._i:
+            out = []
+            try:
+                for info in self.doc[pn].get_image_info(xrefs=True):
+                    out.append((info.get("xref", 0), pymupdf.Rect(info["bbox"])))
+            except Exception:
+                pass
+            self._i[pn] = out
+        return self._i[pn]
 
     def drawings(self, pn):
         if pn not in self._d:
@@ -113,7 +131,7 @@ class Pages:
             for pn in range(n):
                 seen = set()
                 for l in self._page_lines(pn):
-                    if (self._in_margin(pn, l) and len(l["text"]) >= 12
+                    if (self._in_margin(pn, l) and len(l["text"]) >= 12 and not RE_META.search(l["text"])
                             and not RE_START.match(l["text"]) and not RE_OPTLINE.match(l["text"])):
                         seen.add(_norm(l["text"]))
                 cnt.update(seen)
@@ -150,12 +168,12 @@ def _cell_top(pg, pn, lab, lines):
     return y
 
 
-def _starts(doc, ids, skip):
+def _starts(doc, ids, skip, pg=None, numbered=False):
     """Where does each question begin?  {position in list: (page_no, y)}.  Walks the PDF in order and only
     accepts the next expected question numbers, so numbers inside options or tables are not mistaken.
     Paper numbers can repeat (e.g. a General Aptitude part and a subject part both start at Q.1),
     so results are keyed by position, never by number."""
-    pg = Pages(doc)
+    pg = pg or Pages(doc)
     found, k = {}, 0
     for pn in range(len(doc)):
         if pn in skip:
@@ -165,7 +183,7 @@ def _starts(doc, ids, skip):
             t = l["text"]
             if RE_RANGE.match(t):
                 continue
-            m = RE_START.match(t)
+            m = RE_START.match(t) or (RE_START_NUM.match(t) if numbered else None)
             if not m:
                 continue
             n = int(next(g for g in m.groups() if g))
@@ -178,12 +196,12 @@ def _starts(doc, ids, skip):
     return found
 
 
-def question_bands(doc, qs, skip=()):
+def question_bands(doc, qs, skip=(), pg=None, numbered=False):
     """{position: [(page_no, top, bottom), ...]} - the page area(s) each question occupies, and the
     start positions. The area ends before the next question, and before any answer/solution line."""
     skip = set(skip)
-    starts = _starts(doc, [q["id"] for q in qs], skip)
-    pg = Pages(doc)
+    pg = pg or Pages(doc)
+    starts = _starts(doc, [q["id"] for q in qs], skip, pg, numbered)
     bands = {}
     for k in range(len(qs)):
         if k not in starts:
@@ -212,12 +230,12 @@ def question_bands(doc, qs, skip=()):
     return starts, bands
 
 
-def _repeated_images(doc):
-    """Logos / watermarks that repeat on many pages are not question figures."""
+def _repeated_images(doc, pg):
+    """Logos / watermarks that are DRAWN on many pages are not question figures."""
     cnt = Counter()
-    for page in doc:
-        for im in page.get_images(full=True):
-            cnt[im[0]] += 1
+    for pn in range(len(doc)):
+        for x in {x for x, _r in pg.images(pn) if x}:
+            cnt[x] += 1
     return {x for x, c in cnt.items() if c >= max(3, len(doc) // 2)}
 
 
@@ -233,19 +251,45 @@ def _axis_aligned(d):
     return True
 
 
-def _graphics(page, drawings, ytop, ybot, marks):
+def _is_box(d):
+    """True for a container: a rectangle or ROUNDED rectangle (card, table cell, highlighted box, button).
+    Only axis-aligned lines / rectangles plus at most 8 curves (the rounded corners). A circle (curves only)
+    and any diagonal line are NOT boxes."""
+    curves = straight = 0
+    for it in d["items"]:
+        if it[0] == "c":
+            curves += 1
+        elif it[0] == "l":
+            if abs(it[1].x - it[2].x) > 0.5 and abs(it[1].y - it[2].y) > 0.5:
+                return False
+            straight += 1
+        elif it[0] == "re":
+            straight += 1
+        elif it[0] == "qu":
+            if not it[1].is_rectangular:
+                return False
+            straight += 1
+    return straight >= 1 and curves <= 8
+
+
+def _words_in(words, r):
+    return sum(1 for w in words if r.x0 <= (w[0] + w[2]) / 2 <= r.x1 and r.y0 <= (w[1] + w[3]) / 2 <= r.y1)
+
+
+def _graphics(page, drawings, ytop, ybot, marks, words=(), placed=()):
     """Pictures and diagram strokes whose centre lies between ytop and ybot: [(rect, weight)].
     weight > 0 means 'looks like part of a diagram' (picture, curve, diagonal line, shaded box)."""
     W, H = page.rect.width, page.rect.height
     out = []
-    for im in page.get_images(full=True):
-        if im[0] in marks:
+    for xref, r in placed:
+        if xref in marks:
             continue
-        for r in page.get_image_rects(im[0]):
-            if r.width < 25 or r.height < 25 or (r.width > 0.9 * W and r.height > 0.8 * H):
+        if r.width < 20 or r.height < 10 or (r.width > 0.9 * W and r.height > 0.8 * H):
+            continue  # (a one-line equation picture is only ~18pt high, so the minimum is small)
+        if ytop - 3 <= (r.y0 + r.y1) / 2 <= ybot + 3:
+            if _words_in(words, r) >= 15:  # a picture with real text lying on it is a background, not a figure
                 continue
-            if ytop - 3 <= (r.y0 + r.y1) / 2 <= ybot + 3:
-                out.append((r, 10))
+            out.append((r, 10))
     for d in drawings:
         r = d["rect"]
         cy = (r.y0 + r.y1) / 2
@@ -257,6 +301,10 @@ def _graphics(page, drawings, ytop, ybot, marks):
             continue
         if min(r.width, r.height) < 3 and max(r.width, r.height) > 60 and (cy < 65 or cy > H - 65):
             continue  # header / footer rule, not part of a diagram
+        if r.width < 6 and r.height < 6:  # bullets, dots, symbol parts
+            continue
+        if _is_box(d) and r.width >= 60 and r.height >= 14:
+            continue  # card / box / rounded rectangle / table cell: a container, never a diagram
         fill = d.get("fill")
         dark = fill is not None and all(c < 0.35 for c in fill)
         axis = _axis_aligned(d)
@@ -274,7 +322,7 @@ def _graphics(page, drawings, ytop, ybot, marks):
                 w += 1
         if fill is not None and tuple(fill) != (1, 1, 1) and r.width > 2 and r.height > 2:
             if not (axis and dark and (r.width <= 8 or r.height <= 8)):  # thin black bars are lines, not shapes
-                w += 1
+                w += 0.5  # a shaded shape alone must not make a "figure"
         out.append((r, w))
     return out
 
@@ -299,8 +347,8 @@ def _clusters(items, lines):
         out.append((pymupdf.Rect(r), w))
     res = []
     for F, tw in out:
-        if tw < 3:
-            continue
+        if tw < MIN_WEIGHT or (tw < 10 and (F.width < MIN_FIG_W or F.height < MIN_FIG_H)):
+            continue  # (real pictures count 10, so they are never dropped for being small)
         near = F + (-40, -40, 40, 40)
         for r in extras:
             if r.intersects(near) and r.width <= 1.5 * F.width + 60 and r.height <= 1.5 * F.height + 60:
@@ -330,8 +378,8 @@ def _crop(page, F, lines, top, bot, picture_labels):
     kind = {}  # id(line) -> 'fig' | 'opt' | 'ans' | 'stem'
     for l in lines:
         t = l["text"]
-        if RE_ANSLINE.match(t) or RE_SOLLINE.match(t):
-            kind[id(l)] = "ans"
+        if RE_ANSLINE.match(t) or RE_SOLLINE.match(t) or RE_META.search(t):
+            kind[id(l)] = "ans"  # answer / solution lines and "[Question ID = ..]" tags are never shown
         elif picture_labels and RE_LABELONLY.match(t):
             kind[id(l)] = "fig"  # (A) (B) (C) (D) labels of picture options belong to the picture
         elif RE_OPTLINE.match(t):
@@ -370,8 +418,11 @@ def _crop(page, F, lines, top, bot, picture_labels):
 
     pix = page.get_pixmap(clip=clip, dpi=DPI)
     scale = DPI / 72.0
+    raw = pix.tobytes("png")
+    pix = None  # free the pixmap now
     hide = {"ans"} | ({"opt"} if stage < 3 else set()) | ({"stem"} if stage < 2 else set())
-    img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    del raw
     draw = ImageDraw.Draw(img)
     for l in lines:  # paint over everything that must not be visible
         if kind[id(l)] in hide:
@@ -379,20 +430,29 @@ def _crop(page, F, lines, top, bot, picture_labels):
             if not r.is_empty:
                 draw.rectangle([(r.x0 - clip.x0) * scale, (r.y0 - clip.y0) * scale,
                                 (r.x1 - clip.x0) * scale, (r.y1 - clip.y0) * scale], fill=(255, 255, 255))
+    del draw
+    lo = img.convert("L").getextrema()
+    if lo[0] > 235 or lo[1] - lo[0] < 20:  # blank, or a flat colour: no real figure
+        img.close()
+        return None, stage
+    if img.width > MAX_WIDTH:
+        img = img.resize((MAX_WIDTH, max(1, round(img.height * MAX_WIDTH / img.width))), Image.LANCZOS)
+    img = img.quantize(colors=64)  # line art: much smaller PNG
     out = io.BytesIO()
     img.save(out, "PNG", optimize=True)
+    img.close()
     return out.getvalue(), stage
 
 
-def find_figures(doc, qs, skip=(), starts_bands=None):
+def find_figures(doc, qs, skip=(), starts_bands=None, pg=None, numbered=False):
     """Returns (images, picture_opts).
     images:       {position: [data-URI png, ...]}  the diagram(s) belonging to the question at that position
                   (one picture per separate figure, top to bottom)
     picture_opts: {position: ['A','B','C','D']}    questions whose options are pictures (labels but no text)
     Position = index in qs (0-based)."""
-    starts, bands = starts_bands or question_bands(doc, qs, skip)
-    pg = Pages(doc)
-    marks = _repeated_images(doc)
+    pg = pg or Pages(doc)
+    starts, bands = starts_bands or question_bands(doc, qs, skip, pg, numbered)
+    marks = _repeated_images(doc, pg)
     images, picture_opts = {}, {}
     for k, q in enumerate(qs):
         if k not in bands or len(images) >= MAX_FIGURES:
@@ -401,8 +461,15 @@ def find_figures(doc, qs, skip=(), starts_bands=None):
         crops, labels = [], set()
         for p, top, bot in bands[k]:
             page = doc[p]
+            if not pg.images(p) and len(pg.drawings(p)) < 5:
+                continue  # plain text page: nothing to cut out
             lines = pg.lines(p, top, bot)
-            for F, _weight in _clusters(_graphics(page, pg.drawings(p), top, bot, marks), lines):
+            W = page.rect.width
+            for F, weight in _clusters(_graphics(page, pg.drawings(p), top, bot, marks, pg.words(p), pg.images(p)), lines):
+                if weight < 10:  # drawn (vector) figure: reject text boxes / tables that are mostly words
+                    n = _words_in(pg.words(p), F)
+                    if n > 30 or (n > 10 and F.width > 0.6 * W):
+                        continue
                 band_labels = set()
                 for w in pg.words(p):
                     if F.y0 - 24 <= (w[1] + w[3]) / 2 <= F.y1 + 30 and top <= (w[1] + w[3]) / 2 <= bot:

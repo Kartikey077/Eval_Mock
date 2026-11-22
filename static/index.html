@@ -65,6 +65,10 @@ table.qt th{background:var(--bg)}
 .qprev[open] summary{margin-bottom:6px}
 .figs{margin:8px 0}
 .fig{display:block;max-width:100%;height:auto;margin:6px 0;background:#fff;border:1px solid var(--line);border-radius:6px}
+.loading{display:flex;align-items:center;gap:12px;margin:14px 0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.spin{flex:none;width:22px;height:22px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation-duration:2.4s}}
 </style>
 </head>
 <body>
@@ -126,7 +130,7 @@ function viewUpload(error = "") {
   const input = h("input", { type: "file", accept: "application/pdf,.pdf", class: "hidden", id: "file" });
   const drop = h("div", { class: "drop" },
     h("p", {}, h("b", {}, "Drop a PDF here")),
-    h("p", { class: "mute small" }, "The PDF needs selectable text, with numbered questions, lettered options and answers."),
+    h("p", { class: "mute small" }, "The PDF needs selectable text, with numbered questions, lettered options and answers. Maximum 70 pages."),
     h("button", { onclick: () => input.click() }, "Choose PDF"));
   const status = h("div", {});
   const cap = h("p", { class: "mute small" });
@@ -134,7 +138,10 @@ function viewUpload(error = "") {
   if (error) status.append(h("div", { class: "msg err" }, error));
   async function send(file) {
     if (!file) return;
-    status.replaceChildren(h("p", { class: "mute" }, "Reading " + file.name + "… scanned PDFs and AI parsing can take a minute."));
+    status.replaceChildren(h("div", { class: "loading", role: "status", "aria-live": "polite" },
+      h("div", { class: "spin" }),
+      h("div", {}, h("b", {}, "Scanning PDF…"), h("div", { class: "mute small" }, file.name + " · finding questions, options and answers. Scanned PDFs and AI parsing can take a minute."))));
+    drop.querySelectorAll("button").forEach(b => b.disabled = true);
     lastFile = file;
     const fd = new FormData(); fd.append("pdf", file);
     try {
@@ -144,6 +151,7 @@ function viewUpload(error = "") {
       questions = d.questions; fileName = d.filename; meta = d;
       viewVerify();
     } catch { viewUpload("Could not reach the server. Is app.py running?"); }
+    finally { input.value = ""; }
   }
   input.addEventListener("change", () => send(input.files[0]));
   drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
@@ -244,7 +252,7 @@ function viewVerify() {
   const rereadBtn = h("button", { class: "ghost", onclick: reread }, "Re-read PDF with AI (better for maths)");
   async function reread() {
     if (!confirm("The AI will read the PDF again and replace the questions below, including any edits you made. Continue?")) return;
-    rereadBtn.disabled = true; sugMsg.textContent = "AI is reading the PDF… this can take a few minutes.";
+    rereadBtn.disabled = true; sugMsg.replaceChildren(h("span", { class: "spin", style: "display:inline-block;width:14px;height:14px;border-width:2px;vertical-align:-2px;margin-right:6px" }), "AI is reading the PDF… this can take a few minutes.");
     const fd = new FormData(); fd.append("pdf", lastFile); fd.append("force_ai", "1");
     try {
       const r = await fetch("/api/extract", { method: "POST", body: fd }); const d = await r.json();
