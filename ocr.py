@@ -26,7 +26,7 @@ def page_text(page):
     import pymupdf
     from PIL import Image
     pt = _setup()
-    pix = page.get_pixmap(dpi=200, colorspace=pymupdf.csGRAY, alpha=False)  # grey = 1/3 of the memory of colour
+    pix = page.get_pixmap(dpi=int(os.getenv("OCR_DPI", "160")), colorspace=pymupdf.csGRAY, alpha=False)
     img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
     pix = None  # free the pixmap now
     try:

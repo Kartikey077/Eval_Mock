@@ -6,6 +6,5 @@ timeout = 200                # longer than JOB_TIMEOUT (170 s) in runner.py
 graceful_timeout = 30
 worker_tmp_dir = "/dev/shm"  # gunicorn's heartbeat file in RAM, no disk writes
 max_requests = 200           # restart the (small) web worker now and then
-max_requests_jitter = 20
 accesslog = "-"
 errorlog = "-"

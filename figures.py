@@ -67,7 +67,8 @@ class _Lru:
         self.d.clear()
 
 
-PAGE_CACHE = int(os.getenv("PAGE_CACHE", "6"))  # pages kept in memory (a question spans at most 3)
+PAGE_CACHE = int(os.getenv("PAGE_CACHE", "100"))  # small per-page data (words, lines, rules, images)
+DRAW_CACHE = int(os.getenv("DRAW_CACHE", "12"))   # drawings are the heavy part, so keep fewer pages
 
 
 class Pages:
@@ -75,7 +76,8 @@ class Pages:
 
     def __init__(self, doc):
         self.doc = doc
-        self._w, self._d, self._l, self._h, self._m, self._i = (_Lru(PAGE_CACHE) for _ in range(6))
+        self._w, self._l, self._h, self._m, self._i = (_Lru(PAGE_CACHE) for _ in range(5))
+        self._d = _Lru(DRAW_CACHE)
         self._furn = None
 
     def clear(self):

@@ -8,6 +8,7 @@ import os
 import shutil
 import time
 from pathlib import Path
+import threading, uuid
 
 from flask import Flask, jsonify, request, send_file
 from werkzeug.exceptions import HTTPException
@@ -78,24 +79,51 @@ def status():
     return jsonify(ocr=ocr_ready(), ai=llm.available(), provider=llm.provider(), version=VERSION)
 
 
-@app.post("/api/extract")
-def extract():
-    f = request.files.get("pdf")
-    if not f or not f.filename.lower().endswith(".pdf"):
-        return jsonify(error="Choose a PDF file to upload."), 400
-    path = runner.save_upload(f)
+JOBS = {}  # job id -> {"state", "t", "payload", "code"}
+
+
+def _work(jid, path, filename, force, mode, ip):
     try:
         payload, code, ai_used = runner.run_job(
-            "extract", path=path, filename=f.filename, force=request.form.get("force_ai") == "1",
-            mode=request.form.get("mode", ""), ai_ok=ai_left(request.remote_addr))
+            "extract", path=path, filename=filename, force=force, mode=mode, ai_ok=ai_left(ip))
+        if ai_used:
+            ai_count(ip)
+        res = {"payload": payload, "code": code}
+    except Exception:
+        log.exception("Background extract failed")
+        res = {"payload": {"error": "Something went wrong on the server. Please try again."}, "code": 500}
     finally:
         try:
             os.remove(path)
         except OSError:
             pass
-    if ai_used:
-        ai_count(request.remote_addr)
-    return jsonify(payload), code
+    JOBS[jid].update(res, state="done", t=time.time())
+
+
+@app.post("/api/extract")
+def extract():
+    f = request.files.get("pdf")
+    if not f or not f.filename.lower().endswith(".pdf"):
+        return jsonify(error="Choose a PDF file to upload."), 400
+    for k in [k for k, j in JOBS.items() if time.time() - j["t"] > 1800]:  # forget old jobs
+        JOBS.pop(k, None)
+    path = runner.save_upload(f)
+    jid = uuid.uuid4().hex
+    JOBS[jid] = {"state": "running", "t": time.time()}
+    threading.Thread(target=_work, daemon=True, args=(
+        jid, path, f.filename, request.form.get("force_ai") == "1",
+        request.form.get("mode", ""), request.remote_addr)).start()
+    return jsonify(job=jid), 202
+
+
+@app.get("/api/job/<jid>")
+def job(jid):
+    j = JOBS.get(jid)
+    if not j:
+        return jsonify(error="Job not found (the server restarted). Please upload again."), 404
+    if j["state"] != "done":
+        return jsonify(state="running")
+    return jsonify(state="done", code=j["code"], payload=j["payload"])
 
 
 @app.post("/api/suggest")

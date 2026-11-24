@@ -14,9 +14,9 @@ import threading
 import time
 
 log = logging.getLogger("mocktest")
-MAX_JOB_MB = int(os.getenv("MAX_JOB_MB", "480"))    # kill a job that uses more than this (all its processes together)
-JOB_TIMEOUT = int(os.getenv("JOB_TIMEOUT", "170"))  # seconds (keep below the gunicorn --timeout)
-QUEUE_WAIT = int(os.getenv("QUEUE_WAIT", "90"))     # how long a second user waits for the one job slot
+MAX_JOB_MB = int(os.getenv("MAX_JOB_MB", "750"))    # kill a job that uses more than this (all its processes together)
+JOB_TIMEOUT = int(os.getenv("JOB_TIMEOUT", "900"))  # seconds (keep below the gunicorn --timeout)
+QUEUE_WAIT = int(os.getenv("QUEUE_WAIT", "900"))     # how long a second user waits for the one job slot
 _slot = threading.Semaphore(int(os.getenv("MAX_JOBS", "1")))  # 1 = one PDF at a time: the safe choice for 1 GB
 
 
@@ -26,8 +26,8 @@ def _child(conn, kind, kwargs):
         os.setsid()  # own process group: the watchdog can kill the job and Tesseract together
     except Exception:
         pass
-    os.environ.setdefault("PAGE_CACHE", "4")
-    os.environ.setdefault("OMP_THREAD_LIMIT", "1")  # Tesseract: one thread = less memory
+    os.environ.setdefault("PAGE_CACHE", "100")
+    os.environ.setdefault("OMP_THREAD_LIMIT", "12")  # drawings are the heavy part: keep fewer
     try:
         logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(),
                             format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -93,7 +93,7 @@ def run_job(kind, **kwargs):
             if not proc.is_alive():
                 break
             if time.time() - t0 > JOB_TIMEOUT:
-                log.warning("Job %s timed out", kind)
+                log.warning ("Job %s timed out", kind)
                 _kill(proc)
                 return {"error": "This PDF took too long to process. Try a smaller PDF."}, 504, False
             mb = _rss_mb(proc.pid)

@@ -125,6 +125,24 @@ function show(step, ...nodes) {
   show.last = step;
 }
 
+async function runExtract(fd) {
+  const r = await fetch("/api/extract", { method: "POST", body: fd });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || "request failed");
+  let fails = 0;
+  for (;;) {
+    await new Promise(res => setTimeout(res, 2000));
+    let s, j;
+    try { s = await fetch("/api/job/" + d.job); j = await s.json(); }
+    catch { if (++fails > 5) throw new Error("Lost connection to the server."); continue; }
+    if (!s.ok) throw new Error(j.error || "request failed");
+    if (j.state === "done") {
+      if (j.code >= 400) throw new Error(j.payload.error || "request failed");
+      return j.payload;
+    }
+  }
+}
+
 /* ---------- 1. Upload ---------- */
 function viewUpload(error = "") {
   const input = h("input", { type: "file", accept: "application/pdf,.pdf", class: "hidden", id: "file" });
@@ -145,13 +163,11 @@ function viewUpload(error = "") {
     lastFile = file;
     const fd = new FormData(); fd.append("pdf", file);
     try {
-      const r = await fetch("/api/extract", { method: "POST", body: fd });
-      const d = await r.json();
-      if (!r.ok) return viewUpload(d.error);
-      questions = d.questions; fileName = d.filename; meta = d;
-      viewVerify();
-    } catch { viewUpload("Could not reach the server. Is app.py running?"); }
-    finally { input.value = ""; }
+  const d = await runExtract(fd);
+  questions = d.questions; fileName = d.filename; meta = d;
+  viewVerify();
+} catch (e) { viewUpload(e.message || "Could not reach the server."); }
+finally { input.value = ""; }
   }
   input.addEventListener("change", () => send(input.files[0]));
   drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
@@ -260,8 +276,7 @@ function viewVerify() {
     picBtn.disabled = true; sugMsg.replaceChildren(h("span", { class: "spin", style: "display:inline-block;width:14px;height:14px;border-width:2px;vertical-align:-2px;margin-right:6px" }), "Cutting questions out of the PDF…");
     const fd = new FormData(); fd.append("pdf", lastFile); fd.append("mode", "pictures");
     try {
-      const r = await fetch("/api/extract", { method: "POST", body: fd }); const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "request failed");
+      const d = await runExtract(fd);
       questions = d.questions; fileName = d.filename; meta = d; viewVerify();
     } catch (e) { sugMsg.textContent = "Picture mode failed: " + e.message; picBtn.disabled = false; }
   }
@@ -270,8 +285,7 @@ function viewVerify() {
     rereadBtn.disabled = true; sugMsg.replaceChildren(h("span", { class: "spin", style: "display:inline-block;width:14px;height:14px;border-width:2px;vertical-align:-2px;margin-right:6px" }), "AI is reading the PDF… this can take a few minutes.");
     const fd = new FormData(); fd.append("pdf", lastFile); fd.append("force_ai", "1");
     try {
-      const r = await fetch("/api/extract", { method: "POST", body: fd }); const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "request failed");
+      const d = await runExtract(fd);
       questions = d.questions; fileName = d.filename; meta = d; viewVerify();
     } catch (e) { sugMsg.textContent = "AI re-read failed: " + e.message; rereadBtn.disabled = false; }
   }
