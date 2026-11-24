@@ -15,6 +15,7 @@ from werkzeug.exceptions import HTTPException
 
 import llm
 import ocr
+import snapshot
 from memutil import release_memory
 from figures import Pages, find_figures, question_bands
 from layout import find_layout
@@ -105,6 +106,16 @@ def merge_ai(qs, new, target):
     return replaced
 
 
+def pictures_response(doc, pages, filename, why=""):
+    """Picture mode: every question is cut out as one picture (no text reading, no OCR, nothing can be lost)."""
+    qs, notes = snapshot.snapshot_questions(doc, pages)
+    if not qs:
+        return jsonify(error="This PDF looks blank: nothing could be cut out of its pages."), 422
+    if why:
+        notes.insert(0, why)
+    return jsonify(filename=filename, questions=qs, method="Pictures", notes=notes)
+
+
 @app.errorhandler(Exception)
 def on_error(e):
     if isinstance(e, HTTPException):  # 404, 413 etc. keep their normal response
@@ -161,6 +172,8 @@ def extract():
         log.exception("Could not read PDF text %s", f.filename)
         return jsonify(error="This file could not be read as a PDF."), 400
     log.info("Extract: %s, %d pages, force_ai=%s", f.filename, len(pages), force)
+    if request.form.get("mode") == "pictures":  # the user chose picture mode (best for maths papers)
+        return pictures_response(doc, pages, f.filename)
 
     # 1. Scanned pages -> OCR
     blank = [i for i, t in enumerate(pages) if image_based(doc[i], t)]
@@ -246,8 +259,12 @@ def extract():
         else:
             notes.append("Parsing looks incomplete. Add a free GEMINI_API_KEY to a .env file to enable AI parsing for hard PDFs.")
 
-    # --- guard: nothing parsed -> clear error ---
+    # --- guard: nothing parsed -> picture mode instead of an error (this is the "never fails" step) ---
     if not qs:
+        try:
+            return pictures_response(doc, pages, f.filename, "The text could not be read as questions, so each question was cut out as a picture.")
+        except Exception:
+            log.exception("Picture mode failed")
         if len(blank) * 2 >= len(pages):
             todo = ("Install Tesseract OCR, or add a free GEMINI_API_KEY to the .env file so the AI can read the pictures."
                     if not (ocr.available() or llm.available()) else "OCR/AI could not read the questions from the pictures. Try a clearer or larger scan.")
@@ -274,6 +291,9 @@ def extract():
                      + (' or press "Re-read PDF with AI".' if llm.available() else "."))
     if "OCR" in used and "AI" not in used:
         notes.append("Read with OCR: symbols and maths may be misread, so check the questions" + (' or press "Re-read PDF with AI".' if llm.available() else "."))
+    if not quality_ok(qs, "OCR" in used):
+        notes.append('Many questions look incomplete. For maths or symbol-heavy papers press "Cut as pictures": '
+                     'it keeps every question and option exactly as printed.')
     method = ("OCR" if "OCR" in used else "Pictures" if unreadable else "Text") + (" + AI" if "AI" in used else "")
     return jsonify(filename=f.filename, questions=qs, method=method, notes=notes)
 

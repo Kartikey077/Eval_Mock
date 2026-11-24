@@ -210,8 +210,8 @@ function viewVerify() {
       hintTag.hidden = !q.hint;
       const upd = () => { const n = Object.keys(q.options).length; optTag.textContent = q.type !== "NAT" && n >= 2 && n < 4 ? `Only ${n} options found, check` : ""; optTag.hidden = !optTag.textContent; const p = problems(q); tag.textContent = p.join(", "); tag.hidden = !p.length; refresh(); };
       let prev = null;
-      const qt = h("textarea", { "aria-label": `Question ${qi + 1} text`, oninput: e => { q.question = e.target.value; if (q.blocks) { q.blocks = null; if (prev) prev.remove(); } upd(); } });
-      qt.value = q.question;
+      const qt = q.snap ? null : h("textarea", { "aria-label": `Question ${qi + 1} text`, oninput: e => { q.question = e.target.value; if (q.blocks) { q.blocks = null; if (prev) prev.remove(); } upd(); } });
+      if (qt) qt.value = q.question;
       const qb = qbody(q);
       if (qb) prev = h("details", { class: "qprev" }, h("summary", {}, "Preview: how this question looks in the test (table / code layout)"),
         h("p", { class: "mute small", style: "margin:0 0 4px" }, "Read-only. If you edit the question text above, this question switches to plain text."), qb);
@@ -230,26 +230,41 @@ function viewVerify() {
         const multi = q.type === "MSQ";
         body = h("div", {}, h("p", { class: "mute small", style: "margin:10px 0 0" }, multi ? "Tick every correct option:" : "Select the correct option:"),
           Object.keys(q.options).map(L => {
-            const t = h("input", { type: "text", "aria-label": `Option ${L}`, oninput: e => { q.options[L] = e.target.value; upd(); } });
-            t.value = q.options[L];
+            const t = q.snap ? null : h("input", { type: "text", "aria-label": `Option ${L}`, oninput: e => { q.options[L] = e.target.value; upd(); } });
+            if (t) t.value = q.options[L];
             const ctl = h("input", { type: multi ? "checkbox" : "radio", name: "ans" + qi, checked: selArr(q).includes(L),
               onchange: e => { if (multi) { const s = new Set(selArr(q)); e.target.checked ? s.add(L) : s.delete(L); q.answer = [...s].sort(); } else q.answer = L; q.ai = false; aiTag.hidden = true; upd(); } });
             return h("div", { class: "optrow" }, h("label", { class: "key" }, ctl, L), t);
           }),
-          Object.keys(q.options).length < 6 ? h("button", { class: "ghost", style: "margin-top:8px", onclick: () => {
-            q.options[String.fromCharCode(65 + Object.keys(q.options).length)] = "(see figure)"; render(); refresh(); } }, "+ Add option") : null);
+          h("div", { class: "row", style: "margin-top:8px" },
+            Object.keys(q.options).length < 8 ? h("button", { class: "ghost", onclick: () => {
+              q.options[String.fromCharCode(65 + Object.keys(q.options).length)] = q.snap ? "(see picture)" : "(see figure)"; render(); refresh(); } }, "+ Add option") : null,
+            q.snap && Object.keys(q.options).length > 2 ? h("button", { class: "ghost", onclick: () => {
+              const ks = Object.keys(q.options), last = ks[ks.length - 1]; delete q.options[last];
+              q.answer = Array.isArray(q.answer) ? q.answer.filter(x => x !== last) : (q.answer === last ? null : q.answer); render(); refresh(); } }, "- Remove last option") : null));
       }
       upd();
       return h("div", { class: "card" },
         h("div", { class: "qhead" }, h("div", { class: "row" }, h("b", {}, `Question ${qi + 1}`), typeSel, hintTag, optTag, tag, aiTag),
           h("button", { class: "danger", onclick: () => { questions.splice(qi, 1); render(); refresh(); } }, "Remove")),
-        qt, q.images && q.images.length ? h("p", { class: "mute small", style: "margin:10px 0 0" }, "Picture cut from the PDF (students see it with the question):") : null,
+        qt, q.images && q.images.length ? h("p", { class: "mute small", style: "margin:10px 0 0" }, q.snap ? "Question cut from the PDF as a picture (students see exactly this). Tick the correct option below:" : "Picture cut from the PDF (students see it with the question):") : null,
         figs(q), body, prev);
     }));
   }
   const sugBtn = h("button", { class: "ghost", onclick: suggest }, "Suggest missing answers and types with AI");
   const sugMsg = h("span", { class: "mute small" });
   const rereadBtn = h("button", { class: "ghost", onclick: reread }, "Re-read PDF with AI (better for maths)");
+  const picBtn = h("button", { class: "ghost", onclick: pictures }, "Cut as pictures (best for maths)");
+  async function pictures() {
+    if (!confirm("Every question will be cut out of the PDF as a picture, with its options exactly as printed. You then tick the correct answers. This replaces the questions below, including any edits. Continue?")) return;
+    picBtn.disabled = true; sugMsg.replaceChildren(h("span", { class: "spin", style: "display:inline-block;width:14px;height:14px;border-width:2px;vertical-align:-2px;margin-right:6px" }), "Cutting questions out of the PDF…");
+    const fd = new FormData(); fd.append("pdf", lastFile); fd.append("mode", "pictures");
+    try {
+      const r = await fetch("/api/extract", { method: "POST", body: fd }); const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "request failed");
+      questions = d.questions; fileName = d.filename; meta = d; viewVerify();
+    } catch (e) { sugMsg.textContent = "Picture mode failed: " + e.message; picBtn.disabled = false; }
+  }
   async function reread() {
     if (!confirm("The AI will read the PDF again and replace the questions below, including any edits you made. Continue?")) return;
     rereadBtn.disabled = true; sugMsg.replaceChildren(h("span", { class: "spin", style: "display:inline-block;width:14px;height:14px;border-width:2px;vertical-align:-2px;margin-right:6px" }), "AI is reading the PDF… this can take a few minutes.");
@@ -289,7 +304,7 @@ function viewVerify() {
     h("div", { class: "card" }, h("h2", {}, "Check the extracted questions"), summary,
       h("p", { class: "small" }, "Read with: " + (meta.method || "Text")),
       (meta.notes || []).map(n => h("div", { class: "msg warnbox" }, n)),
-      aiOn ? h("div", { class: "row", style: "margin:8px 0" }, sugBtn, lastFile ? rereadBtn : null, sugMsg) : null,
+      h("div", { class: "row", style: "margin:8px 0" }, aiOn ? sugBtn : null, aiOn && lastFile ? rereadBtn : null, lastFile && meta.method !== "Pictures" ? picBtn : null, sugMsg),
       h("p", { class: "mute small" }, "Fix parsing mistakes, set the question type (MCQ one answer, MSQ several answers, NAT typed number), and remove anything that isn't a question.")),
     list,
     h("div", { class: "card" }, h("h2", {}, "Test settings"),
@@ -331,12 +346,12 @@ function viewQuestion() {
     inp.value = T.picked[T.i] || ""; body = inp;
   } else {
     const multi = q.type === "MSQ";
-    body = h("div", {}, multi ? h("p", { class: "mute small", style: "margin:0" }, "Select all that apply.") : null,
+    body = h("div", q.snap ? { style: "display:flex;flex-wrap:wrap;gap:8px" } : {}, multi ? h("p", { class: "mute small", style: "margin:0;width:100%" }, "Select all that apply.") : null,
       Object.entries(q.options).map(([L, txt]) => {
         const on = multi ? (T.picked[T.i] || []).includes(L) : T.picked[T.i] === L;
-        return h("button", { class: "opt" + (on ? " sel" : ""), "aria-pressed": String(on), onclick: () => {
+        return h("button", { class: "opt" + (on ? " sel" : ""), style: q.snap ? "width:auto;min-width:72px;margin-top:0;justify-content:center" : null, "aria-pressed": String(on), onclick: () => {
           if (multi) { const s = new Set(T.picked[T.i] || []); s.has(L) ? s.delete(L) : s.add(L); T.picked[T.i] = [...s].sort(); } else T.picked[T.i] = L;
-          viewQuestion(); } }, h("b", {}, L), h("span", {}, txt));
+          viewQuestion(); } }, h("b", {}, q.snap ? L : L), q.snap ? null : h("span", {}, txt));
       }));
   }
   const pal = h("div", { class: "pal" }, T.qs.map((_, k) => h("button", { class: k === T.i ? "cur" : "", "aria-label": `Go to question ${k + 1}`, onclick: () => go(k) }, k + 1)));
@@ -344,7 +359,7 @@ function viewQuestion() {
     h("div", { class: "qhead" }, h("span", { class: "mute", id: "cinfo" }), T.minutes ? h("span", { class: "timer", id: "timer" }, fmt(Math.max(T.left, 0))) : null),
     h("div", { class: "bar" }, h("i", { id: "fill" })),
     h("p", { class: "mute small", style: "margin:0" }, q.type),
-    qbody(q) || h("h2", { style: "margin-bottom:8px" }, q.question), figs(q), body,
+    q.snap ? null : (qbody(q) || h("h2", { style: "margin-bottom:8px" }, q.question)), figs(q), body,
     h("div", { class: "row", style: "justify-content:space-between;margin-top:18px" },
       h("button", { class: "ghost", disabled: T.i === 0, onclick: () => go(T.i - 1) }, "Previous"),
       isAns(T.picked[T.i]) ? h("button", { class: "ghost", onclick: () => { delete T.picked[T.i]; viewQuestion(); } }, "Clear answer") : null,
@@ -387,11 +402,11 @@ function viewResult(timeUp) {
       const ansArr = Array.isArray(q.answer) ? q.answer : [q.answer];
       rows = Object.entries(q.options).map(([L, t]) => {
         const good = ansArr.includes(L), m = Array.isArray(v) ? v.includes(L) : v === L;
-        return h("div", { class: "ro" + (good ? " good" : m ? " wrong" : "") }, `${L}. ${t}` + (good ? "  ✓ correct" : "") + (m && !good ? "  ✗ your answer" : "") + (m && good ? " (your answer)" : ""));
+        return h("div", { class: "ro" + (good ? " good" : m ? " wrong" : "") }, (q.snap ? L : `${L}. ${t}`) + (good ? "  ✓ correct" : "") + (m && !good ? "  ✗ your answer" : "") + (m && good ? " (your answer)" : ""));
       });
     }
     return h("div", { class: "card rev " + g.st },
-      h("div", { class: "row" }, h("b", {}, qbody(q) ? `${k + 1}.` : `${k + 1}. ${q.question}`), h("span", { class: "tag", style: "background:var(--bg);color:var(--mute)" }, q.type)),
+      h("div", { class: "row" }, h("b", {}, qbody(q) || q.snap ? `${k + 1}.` : `${k + 1}. ${q.question}`), h("span", { class: "tag", style: "background:var(--bg);color:var(--mute)" }, q.type)),
       qbody(q), figs(q),
       g.st === "s" ? h("p", { class: "small", style: "color:var(--warn);margin:4px 0 0" }, "Not answered") : null, rows,
       q.explanation ? h("p", { class: "small mute", style: "margin:8px 0 0" }, "Explanation: " + q.explanation) : null);
