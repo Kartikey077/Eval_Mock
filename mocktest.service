@@ -1,0 +1,20 @@
+# /etc/systemd/system/mocktest.service      (edit User / paths, then:  sudo systemctl daemon-reload && sudo systemctl enable --now mocktest)
+[Unit]
+Description=Mock Test Maker
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/mocktest
+Environment=MALLOC_ARENA_MAX=2
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/mocktest/venv/bin/gunicorn -c gunicorn.conf.py app:app
+Restart=always
+RestartSec=3
+# Hard ceiling for the whole service (web server + PDF jobs). If a PDF ever goes beyond it, only THIS service is
+# stopped, not the whole machine (ssh keeps working).
+MemoryHigh=650M
+MemoryMax=750M
+
+[Install]
+WantedBy=multi-user.target
