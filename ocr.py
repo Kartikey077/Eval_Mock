@@ -23,12 +23,14 @@ def available():
 
 
 def page_text(page):
+    import pymupdf
     from PIL import Image
     pt = _setup()
-    pix = page.get_pixmap(dpi=200)
-    img = Image.open(io.BytesIO(pix.tobytes("png")))
+    pix = page.get_pixmap(dpi=200, colorspace=pymupdf.csGRAY, alpha=False)  # grey = 1/3 of the memory of colour
+    img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
     pix = None  # free the pixmap now
     try:
         return pt.image_to_string(img, config="--psm 4")
     finally:
         img.close()
+        del img

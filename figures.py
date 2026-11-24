@@ -12,8 +12,9 @@ Assumes the usual single-column exam layout.
 """
 import base64
 import io
+import os
 import re
-from collections import Counter
+from collections import Counter, OrderedDict
 
 import pymupdf
 from PIL import Image, ImageDraw
@@ -45,46 +46,70 @@ def _norm(t):
     return re.sub(r"\d+", "#", re.sub(r"\s+", " ", t.strip().lower()))
 
 
+class _Lru:
+    """Keeps only the last few pages. Questions are read top to bottom, so old pages are never needed again;
+    without this every page's words / drawings stayed in memory until the request ended."""
+
+    def __init__(self, size):
+        self.size, self.d = size, OrderedDict()
+
+    def get(self, k, make):
+        if k in self.d:
+            self.d.move_to_end(k)
+            return self.d[k]
+        v = make()
+        self.d[k] = v
+        while len(self.d) > self.size:
+            self.d.popitem(last=False)
+        return v
+
+    def clear(self):
+        self.d.clear()
+
+
+PAGE_CACHE = int(os.getenv("PAGE_CACHE", "6"))  # pages kept in memory (a question spans at most 3)
+
+
 class Pages:
-    """Caches per-page word lists, text lines, rules and drawings so each page is read only once."""
+    """Caches per-page word lists, text lines, rules and drawings (last few pages only)."""
 
     def __init__(self, doc):
         self.doc = doc
-        self._w, self._d, self._l, self._h, self._m, self._furn = {}, {}, {}, {}, {}, None
-        self._i = {}
+        self._w, self._d, self._l, self._h, self._m, self._i = (_Lru(PAGE_CACHE) for _ in range(6))
+        self._furn = None
+
+    def clear(self):
+        for c in (self._w, self._d, self._l, self._h, self._m, self._i):
+            c.clear()
 
     def words(self, pn):
-        if pn not in self._w:
-            self._w[pn] = self.doc[pn].get_text("words")
-        return self._w[pn]
+        return self._w.get(pn, lambda: self.doc[pn].get_text("words"))
 
     def images(self, pn):
         """Pictures really DRAWN on the page: [(xref, Rect)]. page.get_images() is not used: many PDFs share
         one resource list, so it reports pictures that are not on the page at all."""
-        if pn not in self._i:
+        def make():
             out = []
             try:
                 for info in self.doc[pn].get_image_info(xrefs=True):
                     out.append((info.get("xref", 0), pymupdf.Rect(info["bbox"])))
             except Exception:
                 pass
-            self._i[pn] = out
-        return self._i[pn]
+            return out
+        return self._i.get(pn, make)
 
     def drawings(self, pn):
-        if pn not in self._d:
-            self._d[pn] = self.doc[pn].get_drawings()
-        return self._d[pn]
+        # keep only the three fields the code reads (rect, items, fill): colour, width, layer... are dropped
+        return self._d.get(pn, lambda: [{"rect": d["rect"], "items": d["items"], "fill": d.get("fill")}
+                                        for d in self.doc[pn].get_drawings()])
 
     def hrules(self, pn):
         """Horizontal rules (table borders, separators): [(y, x0, x1)]."""
-        if pn not in self._h:
-            self._h[pn] = [((d["rect"].y0 + d["rect"].y1) / 2, d["rect"].x0, d["rect"].x1)
-                           for d in self.drawings(pn) if d["rect"].height < 3 and d["rect"].width > 40]
-        return self._h[pn]
+        return self._h.get(pn, lambda: [((d["rect"].y0 + d["rect"].y1) / 2, d["rect"].x0, d["rect"].x1)
+                                        for d in self.drawings(pn) if d["rect"].height < 3 and d["rect"].width > 40])
 
     def _page_lines(self, pn):
-        if pn not in self._l:
+        def make():
             groups = {}
             for w in self.words(pn):
                 groups.setdefault((w[5], w[6]), []).append(w)
@@ -97,23 +122,26 @@ class Pages:
                                 "x1": max(w[2] for w in ws), "y1": max(w[3] for w in ws), "text": text,
                                 "key": (ws[0][5], ws[0][6])})
             out.sort(key=lambda l: (round(l["y0"]), l["x0"]))
-            self._l[pn] = out
-        return self._l[pn]
+            return out
+        return self._l.get(pn, make)
 
     def mono(self, pn):
         """Boxes of text lines set in a monospace font (program code): in monospace text every character has
-        the same width. Font names are not reliable (many PDFs only say 'CIDFont+F7')."""
-        if pn not in self._m:
+        the same width. Font names are not reliable (many PDFs only say 'CIDFont+F7').
+        Only the small list of boxes is kept; the heavy per-character data is freed at once."""
+        def make():
             boxes = []
-            for b in self.doc[pn].get_text("rawdict")["blocks"]:
+            raw = self.doc[pn].get_text("rawdict")
+            for b in raw["blocks"]:
                 if b.get("type") != 0:
                     continue
                 for l in b["lines"]:
                     ws = [c["bbox"][2] - c["bbox"][0] for sp in l["spans"] for c in sp["chars"] if c["c"].strip()]
                     if len(ws) >= 5 and max(ws) - min(ws) < 0.6:
                         boxes.append(tuple(l["bbox"]))
-            self._m[pn] = boxes
-        return self._m[pn]
+            del raw
+            return boxes
+        return self._m.get(pn, make)
 
     def is_mono(self, pn, l):
         cx, cy = (l["x0"] + l["x1"]) / 2, (l["y0"] + l["y1"]) / 2
@@ -416,13 +444,11 @@ def _crop(page, F, lines, top, bot, picture_labels):
     if clip.height < 15 or clip.width < 15:
         return None, stage
 
-    pix = page.get_pixmap(clip=clip, dpi=DPI)
+    pix = page.get_pixmap(clip=clip, dpi=DPI, alpha=False)
     scale = DPI / 72.0
-    raw = pix.tobytes("png")
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)  # straight copy, no PNG encode / decode
     pix = None  # free the pixmap now
     hide = {"ans"} | ({"opt"} if stage < 3 else set()) | ({"stem"} if stage < 2 else set())
-    img = Image.open(io.BytesIO(raw)).convert("RGB")
-    del raw
     draw = ImageDraw.Draw(img)
     for l in lines:  # paint over everything that must not be visible
         if kind[id(l)] in hide:

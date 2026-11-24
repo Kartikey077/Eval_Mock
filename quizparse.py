@@ -1,4 +1,5 @@
 """Rule-based parser: plain text -> MCQ / MSQ / NAT questions."""
+import os
 import re
 from collections import Counter
 
@@ -586,6 +587,8 @@ def best_text_parse(doc, pages, ocr_idx=()):
     whichever version gives more usable questions."""
     text = clean_pages(pages)
     qs, info = parse_with_info(text) if text.strip() else ([], {})
+    if len(qs) >= 5 and quality_ok(qs) and os.getenv("ALWAYS_ROW_PARSE") != "1":
+        return text, qs, info  # already good: skip the second (row by row) read, it cannot do better
     rows = [pages[i] if i in ocr_idx else rows_text(doc[i]) for i in range(len(pages))]
     t2 = clean_pages(rows)
     q2, i2 = parse_with_info(t2) if t2.strip() else ([], {})

@@ -1,9 +1,8 @@
 """Mock Test Maker - Version 3.1  (text/OCR -> rules -> AI fallback; MCQ, MSQ, NAT)
 Local run:   flask --app app run --debug      ->  http://localhost:5000   (debug ONLY on your own computer)
-Deployed:    gunicorn app:app --workers 1 --threads 4 --timeout 180 --access-logfile - --error-logfile -
+Deployed:    gunicorn app:app --workers 1 --threads 2 --timeout 180 --max-requests 25 --max-requests-jitter 5 --access-logfile - --error-logfile -
 """
 import difflib
-import gc
 import logging
 import os
 import re
@@ -16,6 +15,7 @@ from werkzeug.exceptions import HTTPException
 
 import llm
 import ocr
+from memutil import release_memory
 from figures import Pages, find_figures, question_bands
 from layout import find_layout
 from quizparse import (best_text_parse, complete, has_options, image_based, needs_ai,
@@ -122,11 +122,7 @@ def cleanup(exc):
             doc.close()
         except Exception:
             pass
-    try:
-        pymupdf.TOOLS.store_shrink(100)  # empty MuPDF's internal cache
-    except Exception:
-        pass
-    gc.collect()
+    release_memory()  # gc + MuPDF cache + hand freed heap back to the OS (glibc)
 
 
 @app.get("/")
@@ -171,8 +167,10 @@ def extract():
     if blank:
         if ocr.available():
             try:
-                for i in blank:
+                for n, i in enumerate(blank):
                     pages[i] = ocr.page_text(doc[i])
+                    if n % 8 == 7:
+                        release_memory()  # long scans: do not let buffers pile up
                 used.add("OCR")
             except Exception as e:
                 log.exception("OCR failed")
@@ -193,6 +191,7 @@ def extract():
         if pic:
             qs, info = parse_with_info(text, pic)
         layout = find_layout(doc, qs, set(blank), sb, images, pg=pg, numbered=nb)
+        pg.clear()
         del pg
         for i, q in enumerate(qs):
             if i in images:

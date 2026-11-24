@@ -367,6 +367,8 @@ def find_layout(doc, qs, skip=(), starts_bands=None, images=None, pg=None, numbe
     for k in range(len(qs)):
         if k not in bands or k in images:
             continue
+        for old in [x for x in tabs if x < bands[k][0][0] - 1]:  # pages already passed: free their tables
+            del tabs[old]
         items, margin_lines, first_text = [], [], True
         has_table = False
         for bi, (p, top, bot) in enumerate(bands[k]):
