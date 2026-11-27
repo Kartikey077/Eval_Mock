@@ -1,4 +1,4 @@
-"""Mock Test Maker - Version 3.2  (small web server; every PDF is processed in a short-lived child process)
+"""Mock Test Maker - Version 3.3  (small web server; every PDF is processed in a short-lived child process)
 Local run:   flask --app app run --debug      ->  http://localhost:5000   (debug ONLY on your own computer)
 Deployed:    gunicorn -c gunicorn.conf.py app:app
 The web server imports nothing heavy (no PDF / image / OCR libraries): it uses only a few tens of MB while idle.
@@ -6,9 +6,10 @@ The web server imports nothing heavy (no PDF / image / OCR libraries): it uses o
 import logging
 import os
 import shutil
+import threading
 import time
+import uuid
 from pathlib import Path
-import threading, uuid
 
 from flask import Flask, jsonify, request, send_file
 from werkzeug.exceptions import HTTPException
@@ -17,7 +18,7 @@ import llm
 import runner
 
 BASE = Path(__file__).resolve().parent
-envfile = BASE / ".env"  # optional: ANTHROPIC_API_KEY=sk-ant-...  /  TESSERACT_CMD=...
+envfile = BASE / ".env"  # optional: GEMINI_API_KEY=...  /  TESSERACT_CMD=...
 if envfile.exists():
     for line in envfile.read_text().splitlines():
         if "=" in line and not line.strip().startswith("#"):
@@ -31,7 +32,7 @@ log = logging.getLogger("mocktest")
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 30 * 1024 * 1024
 
-VERSION = "3.2"
+VERSION = "3.3"
 AI_LIMIT = int(os.getenv("AI_DAILY_LIMIT", "40"))  # AI calls per visitor per day (protects the free quota)
 _uses = {}
 
@@ -45,7 +46,7 @@ def ai_left(ip):
 
 def ai_count(ip):
     day = time.strftime("%Y-%m-%d")
-    d, n = _uses.get(ip, (day, 0))
+    _, n = _uses.get(ip, (day, 0))
     _uses[ip] = (day, n + 1)
 
 
@@ -76,16 +77,16 @@ def home():
 
 @app.get("/api/status")
 def status():
-    return jsonify(ocr=ocr_ready(), ai=llm.available(), provider=llm.provider(), version=VERSION)
+    return jsonify(ocr=ocr_ready(), ai=llm.available(), version=VERSION)
 
 
 JOBS = {}  # job id -> {"state", "t", "payload", "code"}
 
 
-def _work(jid, path, filename, force, mode, ip):
+def _work(jid, path, filename, mode, ip):
     try:
         payload, code, ai_used = runner.run_job(
-            "extract", path=path, filename=filename, force=force, mode=mode, ai_ok=ai_left(ip))
+            "extract", path=path, filename=filename, mode=mode, ai_ok=ai_left(ip))
         if ai_used:
             ai_count(ip)
         res = {"payload": payload, "code": code}
@@ -111,8 +112,7 @@ def extract():
     jid = uuid.uuid4().hex
     JOBS[jid] = {"state": "running", "t": time.time()}
     threading.Thread(target=_work, daemon=True, args=(
-        jid, path, f.filename, request.form.get("force_ai") == "1",
-        request.form.get("mode", ""), request.remote_addr)).start()
+        jid, path, f.filename, request.form.get("mode", ""), request.remote_addr)).start()
     return jsonify(job=jid), 202
 
 

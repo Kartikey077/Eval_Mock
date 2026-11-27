@@ -1,5 +1,6 @@
 """OCR for scanned pages (Tesseract). Needs the Tesseract program installed."""
-import io, os, shutil
+import os
+import shutil
 
 
 def _setup():

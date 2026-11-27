@@ -34,22 +34,6 @@ def _similar(a, b):
     return difflib.SequenceMatcher(None, _norm(a), _norm(b)).ratio()
 
 
-def carry_images(old, new):
-    """After the AI replaced every question, give the pictures and layout (tables, code) back to the
-    matching questions (by text)."""
-    pics = [q for q in old if q.get("images") or q.get("blocks")]
-    for n in new:
-        best, score = None, 0.0
-        for q in pics:
-            s = _similar(q["question"], n["question"])
-            if s > score:
-                best, score = q, s
-        if best is not None and score >= 0.6:
-            for key in ("images", "blocks"):
-                if best.get(key):
-                    n[key] = best[key]
-
-
 def merge_ai(qs, new, target):
     """Replace flagged questions with the AI's version, matching by QUESTION TEXT, never by number.
     (The AI numbers questions 1,2,3... by position; the paper may start elsewhere or have gaps.)
@@ -87,9 +71,7 @@ def pictures_response(doc, pages, filename, why=""):
     return jsonify(filename=filename, questions=qs, method="Pictures", notes=notes)
 
 
-
-
-def extract(path, filename, force=False, mode='', ai_ok=True):
+def extract(path, filename, mode="", ai_ok=True):
     notes, used = [], set()
     try:
         doc = pymupdf.open(path)  # opened from disk: the PDF is never held in memory as one big bytes object
@@ -105,7 +87,7 @@ def extract(path, filename, force=False, mode='', ai_ok=True):
     except Exception:
         log.exception("Could not read PDF text %s", filename)
         return jsonify(error="This file could not be read as a PDF."), 400
-    log.info("Extract: %s, %d pages, force_ai=%s", filename, len(pages), force)
+    log.info("Extract: %s, %d pages, mode=%s", filename, len(pages), mode or "text")
     if mode == "pictures":  # the user chose picture mode (best for maths papers)
         return pictures_response(doc, pages, filename)
 
@@ -153,46 +135,37 @@ def extract(path, filename, force=False, mode='', ai_ok=True):
     except Exception:
         log.exception("Figure / layout detection failed")
 
-    # 3. AI fallback, when the result is missing, incomplete, or has fewer options than the rest of the paper
+    # 3. AI fallback, only when the result is missing or clearly poor
     strict = "OCR" in used
-    rules_n = len(qs)
     inc_ids, few_ids = problems(qs)
     unreadable = len(blank) * 2 >= len(pages) and "OCR" not in used
-    want_ai = force or unreadable or needs_ai(qs, strict)
+    want_ai = unreadable or needs_ai(qs, strict)
     log.info("Rules found %d questions; flagged %d incomplete, %d few-option; want_ai=%s",
-             rules_n, len(inc_ids), len(few_ids), want_ai)
+             len(qs), len(inc_ids), len(few_ids), want_ai)
     if want_ai:
-        if llm.available() and not ai_ok:
+        if not llm.available():
+            notes.append("Parsing looks incomplete. Add a free GEMINI_API_KEY to a .env file to enable AI parsing for hard PDFs.")
+        elif not ai_ok:
             notes.append("Daily AI limit reached for your connection. Try again tomorrow.")
-        elif llm.available():
+        else:
             AI_USED[0] = True
             try:
-                new = llm.parse_text(text, expect=rules_n) if (has_options(text) and not (force and blank)) else []
-                if not new or not quality_ok(new, strict) or (force and blank):
+                new = llm.parse_text(text, expect=len(qs)) if has_options(text) else []
+                if not new or not quality_ok(new, strict):
                     pics = llm.parse_images(doc, blank)
-                    if pics and (force or len(pics) > len(new)):
+                    if len(pics) > len(new):
                         new = pics
                 if new:
-                    if force:
-                        carry_images(qs, new)
-                        qs, used = new, used | {"AI"}
-                        notes.append("AI re-read the PDF at your request.")
-                    else:
-                        target = set(inc_ids) | set(few_ids)
-                        replaced = merge_ai(qs, new, target)
-                        if replaced:
-                            used = used | {"AI"}
-                            notes.append(f"AI re-read {len(replaced)} flagged question(s).")
-                        elif target:
-                            notes.append("AI could not be matched safely to the flagged questions, so they were left unchanged.")
-                        if len(new) > len(qs):
-                            notes.append(f'The AI found {len(new) - len(qs)} more question(s) than the normal reader. '
-                                         'Press "Re-read PDF with AI" to use the AI version.')
+                    target = set(inc_ids) | set(few_ids)
+                    replaced = merge_ai(qs, new, target)
+                    if replaced:
+                        used.add("AI")
+                        notes.append(f"AI re-read {len(replaced)} flagged question(s).")
+                    elif target:
+                        notes.append("AI could not be matched safely to the flagged questions, so they were left unchanged.")
             except Exception as e:
                 log.exception("AI parsing failed")
                 notes.append("AI parsing failed: " + str(e)[:150])
-        else:
-            notes.append("Parsing looks incomplete. Add a free GEMINI_API_KEY to a .env file to enable AI parsing for hard PDFs.")
 
     # --- guard: nothing parsed -> picture mode instead of an error (this is the "never fails" step) ---
     if not qs:
@@ -221,11 +194,9 @@ def extract(path, filename, force=False, mode='', ai_ok=True):
     elif bad:
         notes.append(f"{bad} question(s) look incomplete (missing answer or options). They are flagged below.")
     if few_ids:
-        notes.append("Questions " + ", ".join(map(str, few_ids[:12]))
-                     + " have fewer options than the rest of the paper; check them manually"
-                     + (' or press "Re-read PDF with AI".' if llm.available() else "."))
+        notes.append("Questions " + ", ".join(map(str, few_ids[:12])) + " have fewer options than the rest of the paper; check them manually.")
     if "OCR" in used and "AI" not in used:
-        notes.append("Read with OCR: symbols and maths may be misread, so check the questions" + (' or press "Re-read PDF with AI".' if llm.available() else "."))
+        notes.append('Read with OCR: symbols and maths may be misread, so check the questions or press "Cut as pictures".')
     if not quality_ok(qs, "OCR" in used):
         notes.append('Many questions look incomplete. For maths or symbol-heavy papers press "Cut as pictures": '
                      'it keeps every question and option exactly as printed.')
@@ -233,10 +204,8 @@ def extract(path, filename, force=False, mode='', ai_ok=True):
     return jsonify(filename=filename, questions=qs, method=method, notes=notes)
 
 
-
 def suggest(items, ai_ok=True):
-    if not llm.available():
-        return jsonify(error="AI is not set up (no API key)."), 400
+    """Opt-in AI answers for questions that have none. (app.py already checked that the AI is set up.)"""
     if not ai_ok:
         return jsonify(error="Daily AI limit reached. Try again tomorrow."), 429
     if not isinstance(items, list):

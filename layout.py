@@ -329,7 +329,7 @@ def _text_blocks(lines, margin):
         seg = lines[i:j]
         if code[i]:
             levels = _edges([l["x0"] for l in seg], tol=3)  # distinct indentation positions, left to right
-            text = "\n".join("    " * min(range(len(levels)), key=lambda i: abs(levels[i] - l["x0"])) + l["text"]
+            text = "\n".join("    " * min(range(len(levels)), key=lambda n: abs(levels[n] - l["x0"])) + l["text"]
                              for l in seg)
             blocks.append({"t": "code", "x": text})
         else:
@@ -357,7 +357,7 @@ def find_layout(doc, qs, skip=(), starts_bands=None, images=None, pg=None, numbe
     """Returns {position: [blocks]} for questions that contain a table, code or a list.
     Questions that have a figure are left alone (their layout is the picture)."""
     pg = pg or Pages(doc)
-    starts, bands = starts_bands or question_bands(doc, qs, skip, pg, numbered)
+    _, bands = starts_bands or question_bands(doc, qs, skip, pg, numbered)
     images = images or {}
     tabs = {}
     out = {}
@@ -369,9 +369,9 @@ def find_layout(doc, qs, skip=(), starts_bands=None, images=None, pg=None, numbe
             continue
         for old in [x for x in tabs if x < bands[k][0][0] - 1]:  # pages already passed: free their tables
             del tabs[old]
-        items, margin_lines, first_text = [], [], True
+        items, margin_lines = [], []
         has_table = False
-        for bi, (p, top, bot) in enumerate(bands[k]):
+        for p, top, bot in bands[k]:
             page = doc[p]
             if p not in tabs:
                 tabs[p] = [] if sheet else _tables_on(page, pg.drawings(p))
@@ -416,13 +416,13 @@ def find_layout(doc, qs, skip=(), starts_bands=None, images=None, pg=None, numbe
         blocks, seg = [], []
 
         def flush(seg):
-            out = []
+            res = []
             for kind, payload in _split_tables(_merge_rows(seg)):
                 if kind == "table":
-                    out.append(payload)
+                    res.append(payload)
                 else:
-                    out += _text_blocks(payload, margin)
-            return out
+                    res += _text_blocks(payload, margin)
+            return res
 
         for _p, _y, kind, payload in items:
             if kind == "line":

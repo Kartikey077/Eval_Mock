@@ -67,6 +67,7 @@ table.qt th{background:var(--bg)}
 .fig{display:block;max-width:100%;height:auto;margin:6px 0;background:#fff;border:1px solid var(--line);border-radius:6px}
 .loading{display:flex;align-items:center;gap:12px;margin:14px 0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
 .spin{flex:none;width:22px;height:22px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+.spin.sm{display:inline-block;width:14px;height:14px;border-width:2px;vertical-align:-2px;margin-right:6px}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.spin{animation-duration:2.4s}}
 </style>
@@ -84,10 +85,10 @@ const app = document.getElementById("app");
 const STEPS = ["Upload", "Verify", "Test", "Result"];
 let questions = [];   // verified, editable question list
 let fileName = "";
-let T = null;
+let T = null;         // current test state
 let meta = {};
 let aiOn = false;
-let lastFile = null;         // current test state
+let lastFile = null;
 
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
@@ -152,7 +153,10 @@ function viewUpload(error = "") {
     h("button", { onclick: () => input.click() }, "Choose PDF"));
   const status = h("div", {});
   const cap = h("p", { class: "mute small" });
-  fetch("/api/status").then(r => r.json()).then(s => { aiOn = s.ai; cap.textContent = `OCR for scanned PDFs: ${s.ocr ? "ready" : "not installed"}. AI parsing: ${s.ai ? "on (" + s.provider + ")" : "off (no API key)"}. App version ${s.version || "old"}.`; }).catch(() => {});
+  fetch("/api/status").then(r => r.json()).then(s => {
+    aiOn = s.ai;
+    cap.textContent = `OCR for scanned PDFs: ${s.ocr ? "ready" : "not installed"}. AI parsing: ${s.ai ? "on" : "off (no GEMINI_API_KEY)"}. App version ${s.version || "old"}.`;
+  }).catch(() => {});
   if (error) status.append(h("div", { class: "msg err" }, error));
   async function send(file) {
     if (!file) return;
@@ -163,11 +167,11 @@ function viewUpload(error = "") {
     lastFile = file;
     const fd = new FormData(); fd.append("pdf", file);
     try {
-  const d = await runExtract(fd);
-  questions = d.questions; fileName = d.filename; meta = d;
-  viewVerify();
-} catch (e) { viewUpload(e.message || "Could not reach the server."); }
-finally { input.value = ""; }
+      const d = await runExtract(fd);
+      questions = d.questions; fileName = d.filename; meta = d;
+      viewVerify();
+    } catch (e) { viewUpload(e.message || "Could not reach the server."); }
+    finally { input.value = ""; }
   }
   input.addEventListener("change", () => send(input.files[0]));
   drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
@@ -269,25 +273,16 @@ function viewVerify() {
   }
   const sugBtn = h("button", { class: "ghost", onclick: suggest }, "Suggest missing answers and types with AI");
   const sugMsg = h("span", { class: "mute small" });
-  const rereadBtn = h("button", { class: "ghost", onclick: reread }, "Re-read PDF with AI (better for maths)");
   const picBtn = h("button", { class: "ghost", onclick: pictures }, "Cut as pictures (best for maths)");
   async function pictures() {
     if (!confirm("Every question will be cut out of the PDF as a picture, with its options exactly as printed. You then tick the correct answers. This replaces the questions below, including any edits. Continue?")) return;
-    picBtn.disabled = true; sugMsg.replaceChildren(h("span", { class: "spin", style: "display:inline-block;width:14px;height:14px;border-width:2px;vertical-align:-2px;margin-right:6px" }), "Cutting questions out of the PDF…");
+    picBtn.disabled = true;
+    sugMsg.replaceChildren(h("span", { class: "spin sm" }), "Cutting questions out of the PDF…");
     const fd = new FormData(); fd.append("pdf", lastFile); fd.append("mode", "pictures");
     try {
       const d = await runExtract(fd);
       questions = d.questions; fileName = d.filename; meta = d; viewVerify();
     } catch (e) { sugMsg.textContent = "Picture mode failed: " + e.message; picBtn.disabled = false; }
-  }
-  async function reread() {
-    if (!confirm("The AI will read the PDF again and replace the questions below, including any edits you made. Continue?")) return;
-    rereadBtn.disabled = true; sugMsg.replaceChildren(h("span", { class: "spin", style: "display:inline-block;width:14px;height:14px;border-width:2px;vertical-align:-2px;margin-right:6px" }), "AI is reading the PDF… this can take a few minutes.");
-    const fd = new FormData(); fd.append("pdf", lastFile); fd.append("force_ai", "1");
-    try {
-      const d = await runExtract(fd);
-      questions = d.questions; fileName = d.filename; meta = d; viewVerify();
-    } catch (e) { sugMsg.textContent = "AI re-read failed: " + e.message; rereadBtn.disabled = false; }
   }
   async function suggest() {
     const need = questions.map((q, i) => ({ i, q })).filter(o => o.q.question.trim() && !(o.q.images && o.q.images.length) && !(o.q.type === "NAT" ? hasNum(o.q.answer && o.q.answer.min) : selArr(o.q).length));
@@ -318,7 +313,7 @@ function viewVerify() {
     h("div", { class: "card" }, h("h2", {}, "Check the extracted questions"), summary,
       h("p", { class: "small" }, "Read with: " + (meta.method || "Text")),
       (meta.notes || []).map(n => h("div", { class: "msg warnbox" }, n)),
-      h("div", { class: "row", style: "margin:8px 0" }, aiOn ? sugBtn : null, aiOn && lastFile ? rereadBtn : null, lastFile && meta.method !== "Pictures" ? picBtn : null, sugMsg),
+      h("div", { class: "row", style: "margin:8px 0" }, aiOn ? sugBtn : null, lastFile && meta.method !== "Pictures" ? picBtn : null, sugMsg),
       h("p", { class: "mute small" }, "Fix parsing mistakes, set the question type (MCQ one answer, MSQ several answers, NAT typed number), and remove anything that isn't a question.")),
     list,
     h("div", { class: "card" }, h("h2", {}, "Test settings"),
@@ -365,7 +360,7 @@ function viewQuestion() {
         const on = multi ? (T.picked[T.i] || []).includes(L) : T.picked[T.i] === L;
         return h("button", { class: "opt" + (on ? " sel" : ""), style: q.snap ? "width:auto;min-width:72px;margin-top:0;justify-content:center" : null, "aria-pressed": String(on), onclick: () => {
           if (multi) { const s = new Set(T.picked[T.i] || []); s.has(L) ? s.delete(L) : s.add(L); T.picked[T.i] = [...s].sort(); } else T.picked[T.i] = L;
-          viewQuestion(); } }, h("b", {}, q.snap ? L : L), q.snap ? null : h("span", {}, txt));
+          viewQuestion(); } }, h("b", {}, L), q.snap ? null : h("span", {}, txt));
       }));
   }
   const pal = h("div", { class: "pal" }, T.qs.map((_, k) => h("button", { class: k === T.i ? "cur" : "", "aria-label": `Go to question ${k + 1}`, onclick: () => go(k) }, k + 1)));
@@ -419,9 +414,10 @@ function viewResult(timeUp) {
         return h("div", { class: "ro" + (good ? " good" : m ? " wrong" : "") }, (q.snap ? L : `${L}. ${t}`) + (good ? "  ✓ correct" : "") + (m && !good ? "  ✗ your answer" : "") + (m && good ? " (your answer)" : ""));
       });
     }
+    const qb = qbody(q);
     return h("div", { class: "card rev " + g.st },
-      h("div", { class: "row" }, h("b", {}, qbody(q) || q.snap ? `${k + 1}.` : `${k + 1}. ${q.question}`), h("span", { class: "tag", style: "background:var(--bg);color:var(--mute)" }, q.type)),
-      qbody(q), figs(q),
+      h("div", { class: "row" }, h("b", {}, qb || q.snap ? `${k + 1}.` : `${k + 1}. ${q.question}`), h("span", { class: "tag", style: "background:var(--bg);color:var(--mute)" }, q.type)),
+      qb, figs(q),
       g.st === "s" ? h("p", { class: "small", style: "color:var(--warn);margin:4px 0 0" }, "Not answered") : null, rows,
       q.explanation ? h("p", { class: "small mute", style: "margin:8px 0 0" }, "Explanation: " + q.explanation) : null);
   });

@@ -15,8 +15,8 @@ import time
 
 log = logging.getLogger("mocktest")
 MAX_JOB_MB = int(os.getenv("MAX_JOB_MB", "750"))    # kill a job that uses more than this (all its processes together)
-JOB_TIMEOUT = int(os.getenv("JOB_TIMEOUT", "900"))  # seconds (keep below the gunicorn --timeout)
-QUEUE_WAIT = int(os.getenv("QUEUE_WAIT", "900"))     # how long a second user waits for the one job slot
+JOB_TIMEOUT = int(os.getenv("JOB_TIMEOUT", "900"))  # seconds (keep below the gunicorn timeout)
+QUEUE_WAIT = int(os.getenv("QUEUE_WAIT", "900"))    # how long a second user waits for the one job slot
 _slot = threading.Semaphore(int(os.getenv("MAX_JOBS", "1")))  # 1 = one PDF at a time: the safe choice for 1 GB
 
 
@@ -26,8 +26,8 @@ def _child(conn, kind, kwargs):
         os.setsid()  # own process group: the watchdog can kill the job and Tesseract together
     except Exception:
         pass
-    os.environ.setdefault("PAGE_CACHE", "100")
-    os.environ.setdefault("OMP_THREAD_LIMIT", "12")  # drawings are the heavy part: keep fewer
+    os.environ.setdefault("PAGE_CACHE", "100")        # small per-page data kept in memory (see figures.py)
+    os.environ.setdefault("OMP_THREAD_LIMIT", "12")   # threads Tesseract may use
     try:
         logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(),
                             format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -38,7 +38,7 @@ def _child(conn, kind, kwargs):
     except MemoryError:
         conn.send(({"error": "This PDF needs more memory than the server has. Try a PDF with fewer pages."}, 413, False))
     except Exception:
-        logging.getLogger("mocktest").exception("Job %s failed", kind)
+        log.exception("Job %s failed", kind)
         conn.send(({"error": "Something went wrong on the server. Please try again."}, 500, False))
     finally:
         conn.close()
@@ -46,7 +46,6 @@ def _child(conn, kind, kwargs):
 
 def _rss_mb(pid):
     """Memory (MB) of a process plus its children (Tesseract). Linux only; returns 0 elsewhere."""
-    total, want = 0, {pid}
     try:
         procs = {}
         for d in os.listdir("/proc"):
@@ -58,17 +57,16 @@ def _rss_mb(pid):
                 ppid = int(st.split("PPid:")[1].split()[0])
                 rss = int(st.split("VmRSS:")[1].split()[0]) if "VmRSS:" in st else 0
                 procs[int(d)] = (ppid, rss)
-        grew = True
+        want, grew = {pid}, True
         while grew:
             grew = False
             for p, (pp, _r) in procs.items():
                 if pp in want and p not in want:
                     want.add(p)
                     grew = True
-        total = sum(procs[p][1] for p in want if p in procs)
+        return sum(procs[p][1] for p in want if p in procs) // 1024
     except Exception:
         return 0
-    return total // 1024
 
 
 def run_job(kind, **kwargs):
@@ -93,7 +91,7 @@ def run_job(kind, **kwargs):
             if not proc.is_alive():
                 break
             if time.time() - t0 > JOB_TIMEOUT:
-                log.warning ("Job %s timed out", kind)
+                log.warning("Job %s timed out", kind)
                 _kill(proc)
                 return {"error": "This PDF took too long to process. Try a smaller PDF."}, 504, False
             mb = _rss_mb(proc.pid)

@@ -18,7 +18,7 @@ import statistics
 from collections import Counter
 
 import pymupdf
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from figures import (BOTTOM_MARGIN, RE_ANSLINE, RE_OPTLINE, RE_SOLLINE, RE_START, RE_START_NUM, TOP_MARGIN,
                      Pages, _cell_top, _norm)
@@ -97,7 +97,7 @@ def _gfx(pg, pn):
     if pn in cache:
         return cache[pn]
     page = pg.doc[pn]
-    W, H = page.rect.width, page.rect.height
+    W = page.rect.width
     tl, bl = _limits(pg.doc, pg, pn)
     imgs = [(x, r) for x, r in pg.images(pn) if r.width >= 12 and r.height >= 8]
     sizes = Counter((round(r.width), round(r.height)) for _x, r in imgs)
@@ -150,8 +150,7 @@ def _attached(pg, pn, y, below):
         inside = l["x0"] >= zone.x0 and l["x1"] <= zone.x1
         if (inside or len(t) < 25) and zone.x0 <= cx <= zone.x1 and zone.y0 <= cy <= zone.y1:
             keep.append(pymupdf.Rect(l["x0"] - 2, l["y0"] - 2, l["x1"] + 2, l["y1"] + 2))
-    far = [k for k in keep if (k.y1 > y + 1 if below else k.y0 < y - 1)]
-    return far
+    return [k for k in keep if (k.y1 > y + 1 if below else k.y0 < y - 1)]
 
 
 def _cut_at_answer(pg, pieces):
@@ -258,7 +257,6 @@ def _has_content(pg, p, top, bot):
 
 def _picture(doc, pg, pieces):
     """The pieces of one question -> one PNG data-URI (None when there is nothing but white)."""
-    from PIL import ImageDraw
     parts = []
     scale = DPI / 72.0
     for p, top, bot, keep in pieces:
@@ -292,6 +290,7 @@ def _picture(doc, pg, pieces):
         rects = [(l["x0"] - 2, l["y0"] - 3, l["x1"] + 2, l["y1"] + 3) for l in pg.lines(p, top - 1, bot + 1)
                  if RE_META.search(l["text"]) or RE_LABEL_ALONE.match(l["text"])
                  or RE_ANSLINE.match(l["text"]) or RE_SOLLINE.match(l["text"])]
+
         # neighbour questions: wipe only the sliver of their letters (descenders / tops) that reaches into this cut,
         # never more, so this question's own first / last line stays intact
         def mine(l):  # a label that belongs to a figure crossing the cut is not a neighbour's text

@@ -227,8 +227,8 @@ def _starts(doc, ids, skip, pg=None, numbered=False):
 
 
 def question_bands(doc, qs, skip=(), pg=None, numbered=False):
-    """{position: [(page_no, top, bottom), ...]} - the page area(s) each question occupies, and the
-    start positions. The area ends before the next question, and before any answer/solution line."""
+    """(starts, bands). starts = {position: (page_no, y)}; bands = {position: [(page_no, top, bottom), ...]} - the
+    page area(s) each question occupies. The area ends before the next question, and before any answer/solution line."""
     skip = set(skip)
     pg = pg or Pages(doc)
     starts = _starts(doc, [q["id"] for q in qs], skip, pg, numbered)
@@ -390,7 +390,7 @@ def _clusters(items, lines):
 # ---------------------------------------------------------------- cutting the figure out
 
 def _crop(page, F, lines, top, bot, picture_labels):
-    """Render the area around figure F. Returns a PNG (bytes).
+    """Render the area around figure F. Returns PNG bytes, or None when there is nothing worth showing.
     lines: the text lines in this band. Stage 1: figure only. Stage 2: + question text. Stage 3: + options."""
     W = page.rect.width
     zone = pymupdf.Rect(F.x0 - SIDE, F.y0 - 14, F.x1 + SIDE, F.y1 + 14)  # text fully inside = part of the figure
@@ -444,7 +444,7 @@ def _crop(page, F, lines, top, bot, picture_labels):
         y1 = min([y1] + [b for b in below if b >= F.y1])
     clip = pymupdf.Rect(x0, max(top, y0), x1, min(bot, y1))
     if clip.height < 15 or clip.width < 15:
-        return None, stage
+        return None
 
     pix = page.get_pixmap(clip=clip, dpi=DPI, alpha=False)
     scale = DPI / 72.0
@@ -462,14 +462,14 @@ def _crop(page, F, lines, top, bot, picture_labels):
     lo = img.convert("L").getextrema()
     if lo[0] > 235 or lo[1] - lo[0] < 20:  # blank, or a flat colour: no real figure
         img.close()
-        return None, stage
+        return None
     if img.width > MAX_WIDTH:
         img = img.resize((MAX_WIDTH, max(1, round(img.height * MAX_WIDTH / img.width))), Image.LANCZOS)
     img = img.quantize(colors=64)  # line art: much smaller PNG
     out = io.BytesIO()
     img.save(out, "PNG", optimize=True)
     img.close()
-    return out.getvalue(), stage
+    return out.getvalue()
 
 
 def find_figures(doc, qs, skip=(), starts_bands=None, pg=None, numbered=False):
@@ -479,7 +479,7 @@ def find_figures(doc, qs, skip=(), starts_bands=None, pg=None, numbered=False):
     picture_opts: {position: ['A','B','C','D']}    questions whose options are pictures (labels but no text)
     Position = index in qs (0-based)."""
     pg = pg or Pages(doc)
-    starts, bands = starts_bands or question_bands(doc, qs, skip, pg, numbered)
+    _, bands = starts_bands or question_bands(doc, qs, skip, pg, numbered)
     marks = _repeated_images(doc, pg)
     images, picture_opts = {}, {}
     for k, q in enumerate(qs):
@@ -506,7 +506,7 @@ def find_figures(doc, qs, skip=(), starts_bands=None, pg=None, numbered=False):
                             band_labels.add((m.group(1) or m.group(2)).upper())
                 labels |= band_labels
                 picture_labels = bool(band_labels - real)  # options are pictures: keep their (A)(B)(C)(D) labels
-                png, _stage = _crop(page, F, lines, top, bot, picture_labels)
+                png = _crop(page, F, lines, top, bot, picture_labels)
                 if png:
                     crops.append("data:image/png;base64," + base64.b64encode(png).decode())
         if not crops:

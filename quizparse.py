@@ -21,19 +21,22 @@ def opt_match(p):
     if not m:
         return None
     return (m.group(1).upper() if m.group(1) else chr(64 + int(m.group(2)))), m.group(3).strip()
+
+
 RE_ANS = re.compile(r"^\s*(?:correct\s+(?:answers?|options?)|answers?|ans\.?)\s*[:\-.]?\s*(.+)", re.I)
 RE_EXP = re.compile(r"^\s*(?:explanation|solution|reason)\s*[:\-]\s*(.*)", re.I)
 RE_KEY = re.compile(r"^\s*(?:answer\s*key|answers|solutions?)\s*:?\s*(.*)$", re.I)
 SEP = r"(?:[\.\):\-–—=→]\s*|\s+)"
 RE_PAIR = re.compile(rf"(?:Q\.?\s*)?(\d+)\s*{SEP}({VALUE})", re.I)
 PAIRS_ONLY = re.compile(rf"^(?:\s*(?:Q\.?\s*)?\d+\s*{SEP}{VALUE}\s*[,;]?)+\s*$", re.I)
-# official key tables:  "27 2 MSQ CS-2 B;C 1"   (no. session type section key marks)
 # wording that usually means "more than one option may be correct" (a hint only, never certain)
 RE_MULTI = re.compile(r"\bis\s*/\s*are\b|\bare\s*/\s*is\b|\w\(s\)|\bone or more\b|\bselect all\b|\bmore than one\b", re.I)
 # "Question Number : 35   Correct : 2   Wrong : -0.66"  (question marker used by some papers)
 RE_QNUM = re.compile(r"^\s*Question\s*Number\s*:\s*(\d[\d ]*?)\s*(?:Correct\b|$)", re.I)
 # an option whose "text" is only other option labels, e.g. "(B)" - happens when options are pictures
 RE_LABELONLY = re.compile(r"^(?:(?:\([A-Ea-e]\)|[A-Ea-e][\.\)])\s*)+$")
+
+
 def junk_option(t):
     """True for an 'option' that is really text taken from a picture: only labels like '(B)', or a longer text
     that contains another option label such as '(B) WR X WR N Garden ...'."""
@@ -42,6 +45,7 @@ def junk_option(t):
 
 
 RE_TAILLABELS = re.compile(r"(?:\s*\([A-Ea-e]\))+\s*$")
+# official key tables:  "27 2 MSQ CS-2 B;C 1"   (no. session type section key marks)
 RE_ROW = re.compile(r"(?<!\d)(\d{1,3})\s+\d+\s+(MCQ|MSQ|NAT)\s+\S+\s+(.+?)\s+\d+(?:\.\d+)?\s*$")
 
 
@@ -113,7 +117,8 @@ def parse_answer(raw):
         return sorted(set(re.findall(r"[A-E]", raw.upper())))
     m = re.fullmatch(rf"({NUM})(?:\s*(?:to|[–—-])\s*({NUM}))?(?:\s+[^\d\s]\S*)?", raw)
     if m:
-        lo = float(m.group(1)); hi = float(m.group(2) or lo)
+        lo = float(m.group(1))
+        hi = float(m.group(2) or lo)
         return {"min": min(lo, hi), "max": max(lo, hi)}
     return None
 
@@ -144,13 +149,16 @@ def _table_key(lines):
         m = RE_ROW.search(l)
         a = parse_answer(m.group(3)) if m else None
         if a is not None:
-            n = int(m.group(1)); key[n], types[n] = a, m.group(2).upper(); idx.append(i)
+            n = int(m.group(1))
+            key[n], types[n] = a, m.group(2).upper()
+            idx.append(i)
     if len(key) < 3:
         return None
     start = idx[0]
     for j in range(max(0, start - 6), start):  # cut at the "Answer Key for ..." title just above the table
         if re.match(r"\s*answer\s*key\b", lines[j], re.I):
-            start = j; break
+            start = j
+            break
     return key, lines[:start], types
 
 
@@ -172,11 +180,14 @@ def _split_key(lines):
         m = RE_KEY.match(lines[i])
         rest = m.group(1).strip() if m else ""
         if m and (not rest or len(RE_PAIR.findall(rest)) >= 2):
-            take(rest); i += 1
+            take(rest)
+            i += 1
             while i < len(lines) and PAIRS_ONLY.match(lines[i]):
-                take(lines[i]); i += 1
+                take(lines[i])
+                i += 1
             continue
-        keep.append(lines[i]); i += 1
+        keep.append(lines[i])
+        i += 1
     if not key:
         j = len(keep)
         while j > 0 and PAIRS_ONLY.match(keep[j - 1]):
@@ -417,10 +428,6 @@ def parse_with_info(text, picture_opts=None):
     return best
 
 
-def parse_questions(text):
-    return parse_with_info(text)[0]
-
-
 def complete(q):
     if q["type"] == "NAT":
         return isinstance(q["answer"], dict)
@@ -445,6 +452,7 @@ def quality_ok(qs, strict=False):
     check = structured if all(not q["answer"] for q in qs) else complete
     return sum(map(check, qs)) / len(qs) >= (1.0 if strict else 0.9)
 
+
 def problems(qs):
     """Return (incomplete, few_options) as 1-based POSITIONS in the list (the 'Question N' you see on screen).
     Paper numbers can repeat, so positions are the only unambiguous label."""
@@ -463,7 +471,7 @@ def problems(qs):
 def needs_ai(qs, strict=False):
     """True only when the normal reader clearly failed: no questions, or fewer than 60% of them usable
     (90% for OCR text). A few flagged questions are NOT sent to the AI (it costs quota and often changes nothing):
-    they are listed in the notes and marked in the Verify screen, and 'Re-read PDF with AI' stays available."""
+    they are listed in the notes and marked in the Verify screen."""
     if not qs:
         return True
     check = structured if all(not q["answer"] for q in qs) else complete
